@@ -1,0 +1,514 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'API Gateway and Lambda functions for VisualForge AI'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod, test, test-simple]
+
+  CognitoUserPoolId:
+    Type: String
+    Description: Cognito User Pool ID for JWT authorization
+
+  DatabaseSecretArn:
+    Type: String
+    Description: Database secret ARN from database stack
+
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Base domain name for API Gateway custom domain
+
+  CertificateArn:
+    Type: String
+    Description: SSL certificate ARN for custom domain
+
+Resources:
+  # IAM role for Lambda functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-ns-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DatabaseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DatabaseSecretArn
+              - Effect: Allow
+                Action:
+                  - rds:DescribeDBClusters
+                  - rds:DescribeDBInstances
+                Resource: '*'
+
+  # Lambda Layer for shared dependencies
+  SharedLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub "${Environment}-visualforge-shared"
+      Description: Shared dependencies for VisualForge Lambda functions
+      Content:
+        S3Bucket: !Sub "${Environment}-visualforge-lambda-code"
+        S3Key: layers/shared.zip
+      CompatibleRuntimes:
+        - nodejs18.x
+
+  # Core Service Lambda Function
+  CoreServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-visualforge-core"
+      Runtime: nodejs18.x
+      Handler: core/index.handler
+      Code:
+        S3Bucket: !Sub "${Environment}-visualforge-lambda-code"
+        S3Key: functions/core.zip
+      Layers:
+        - !Ref SharedLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-lambda-sg-id"
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-1-id"
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-2-id"
+      Environment:
+        Variables:
+          NODE_ENV: !Ref Environment
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+      Timeout: 30
+
+  # User API Lambda Function
+  UserApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-visualforge-user-api"
+      Runtime: nodejs18.x
+      Handler: user-api/index.handler
+      Code:
+        S3Bucket: !Sub "${Environment}-visualforge-lambda-code"
+        S3Key: functions/user-api.zip
+      Layers:
+        - !Ref SharedLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-lambda-sg-id"
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-1-id"
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-2-id"
+      Environment:
+        Variables:
+          NODE_ENV: !Ref Environment
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+      Timeout: 30
+
+  # Dashboard API Lambda Function
+  DashboardApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-visualforge-dashboard-api"
+      Runtime: nodejs18.x
+      Handler: dashboard-api/index.handler
+      Code:
+        S3Bucket: !Sub "${Environment}-visualforge-lambda-code"
+        S3Key: functions/dashboard-api.zip
+      Layers:
+        - !Ref SharedLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-lambda-sg-id"
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-1-id"
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-2-id"
+      Environment:
+        Variables:
+          NODE_ENV: !Ref Environment
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+      Timeout: 30
+
+  # Payments API Lambda Function
+  PaymentsApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-visualforge-payments-api"
+      Runtime: nodejs18.x
+      Handler: payments-api/index.handler
+      Code:
+        S3Bucket: !Sub "${Environment}-visualforge-lambda-code"
+        S3Key: functions/payments-api.zip
+      Layers:
+        - !Ref SharedLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-lambda-sg-id"
+        SubnetIds:
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-1-id"
+          - !ImportValue
+            Fn::Sub: "${Environment}-private-subnet-2-id"
+      Environment:
+        Variables:
+          NODE_ENV: !Ref Environment
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          COGNITO_USER_POOL_ID: !Ref CognitoUserPoolId
+          STRIPE_SECRET_KEY: !Sub "{{resolve:secretsmanager:visualforge-ai/api-keys/development:SecretString:STRIPE_SECRET_KEY}}"
+          STRIPE_WEBHOOK_SECRET: !Sub "{{resolve:secretsmanager:visualforge-ai/api-keys/development:SecretString:STRIPE_WEBHOOK_SECRET}}"
+      Timeout: 30
+
+
+  # API Gateway
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${Environment}-visualforge-api"
+      Description: VisualForge AI API Gateway
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  # Cognito Authorizer
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub "${Environment}-cognito-authorizer"
+      Type: COGNITO_USER_POOLS
+      RestApiId: !Ref ApiGateway
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${CognitoUserPoolId}"
+
+  # API Gateway Resources and Methods
+  CoreResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: core
+
+  CoreProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref CoreResource
+      PathPart: "{proxy+}"
+
+  CoreProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref CoreProxyResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CoreServiceFunction.Arn}/invocations"
+
+  UsersResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: users
+
+  UsersProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref UsersResource
+      PathPart: "{proxy+}"
+
+  UsersProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref UsersProxyResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UserApiFunction.Arn}/invocations"
+
+  DashboardResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: dashboard
+
+  DashboardProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref DashboardResource
+      PathPart: "{proxy+}"
+
+  DashboardProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref DashboardProxyResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DashboardApiFunction.Arn}/invocations"
+
+  PaymentsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: payments
+
+  PaymentsProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref PaymentsResource
+      PathPart: "{proxy+}"
+
+  PaymentsProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref PaymentsProxyResource
+      HttpMethod: ANY
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PaymentsApiFunction.Arn}/invocations"
+
+  # Stripe Webhook endpoint (no authentication required)
+  PaymentsWebhookResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref PaymentsResource
+      PathPart: webhook
+
+  PaymentsWebhookMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref PaymentsWebhookResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PaymentsApiFunction.Arn}/invocations"
+
+  # Health Check Resources (public, no authorization)
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: health
+
+  HealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CoreServiceFunction.Arn}/invocations"
+
+  # Core Health Check (public)
+  CoreHealthApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref CoreResource
+      PathPart: api
+
+  CoreHealthApiHealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref CoreHealthApiResource
+      PathPart: health
+
+  CoreHealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref CoreHealthApiHealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CoreServiceFunction.Arn}/invocations"
+
+  # Payments Health Check (public)
+  PaymentsHealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref PaymentsResource
+      PathPart: health
+
+  PaymentsHealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref PaymentsHealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PaymentsApiFunction.Arn}/invocations"
+
+  # Cost Controls API Resources (no authorization - uses API key)
+  CostControlsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !GetAtt ApiGateway.RootResourceId
+      PathPart: costcontrols
+
+  CostControlsProxyResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ParentId: !Ref CostControlsResource
+      PathPart: "{proxy+}"
+
+  CostControlsProxyMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGateway
+      ResourceId: !Ref CostControlsProxyResource
+      HttpMethod: ANY
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PaymentsApiFunction.Arn}/invocations"
+
+  # Lambda permissions for API Gateway
+  CoreLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CoreServiceFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*"
+
+  UserApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UserApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*"
+
+  DashboardApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DashboardApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*"
+
+  PaymentsApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PaymentsApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*"
+
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - CoreProxyMethod
+      - UsersProxyMethod
+      - DashboardProxyMethod
+      - PaymentsProxyMethod
+      - PaymentsWebhookMethod
+      - CostControlsProxyMethod
+      - HealthMethod
+      - CoreHealthMethod
+      - PaymentsHealthMethod
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: !Ref Environment
+
+  # Base path mapping for existing custom domain
+  BasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Sub "api-${Environment}.${DomainName}"
+      RestApiId: !Ref ApiGateway
+      Stage: !Ref Environment
+
+Outputs:
+  ApiGatewayUrl:
+    Description: API Gateway URL
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${Environment}-ns-api-url"
+
+  ApiGatewayId:
+    Description: API Gateway ID
+    Value: !Ref ApiGateway
+    Export:
+      Name: !Sub "${Environment}-ns-api-gateway-id"
+
+  CustomDomainUrl:
+    Description: Custom domain URL for API Gateway
+    Value: !Sub "https://api-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-ns-api-custom-url"
+
+  CustomDomainName:
+    Description: Custom domain name
+    Value: !Sub "api-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-api-domain-name"

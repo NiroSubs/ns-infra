@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Route53 DNS configuration for dev.visualforge.ai'
+
+Parameters:
+  HostedZoneId:
+    Type: String
+    Default: Z015790023056BKZ15UTB
+    Description: Route53 Hosted Zone ID for visualforge.ai
+    
+  CloudFrontDistributionDomainName:
+    Type: String
+    Default: dz2lwnpg8aefz.cloudfront.net
+    Description: CloudFront distribution domain name
+    
+  CloudFrontHostedZoneId:
+    Type: String
+    Default: Z2FDTNDATAQYW2
+    Description: CloudFront Hosted Zone ID (constant for all CloudFront distributions)
+
+Resources:
+  DevSubdomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: dev.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDistributionDomainName
+        HostedZoneId: !Ref CloudFrontHostedZoneId
+        EvaluateTargetHealth: false
+      
+  DevSubdomainAAAARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: dev.visualforge.ai
+      Type: AAAA
+      AliasTarget:
+        DNSName: !Ref CloudFrontDistributionDomainName
+        HostedZoneId: !Ref CloudFrontHostedZoneId
+        EvaluateTargetHealth: false
+
+Outputs:
+  DevDomainName:
+    Description: Development environment domain
+    Value: dev.visualforge.ai
+    Export:
+      Name: dev-domain-name
+      
+  CloudFrontDistribution:
+    Description: CloudFront distribution domain
+    Value: !Ref CloudFrontDistributionDomainName

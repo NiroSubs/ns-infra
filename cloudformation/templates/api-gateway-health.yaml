@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Health check endpoints for VisualForge AI API Gateway'
+
+Parameters:
+  ApiGatewayId:
+    Type: String
+    Description: The API Gateway ID to add health endpoints to
+  
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod, test]
+
+Resources:
+  # Public health check for Core Service
+  CoreHealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      ParentId: 
+        Fn::ImportValue: !Sub "${Environment}-api-gateway-root"
+      PathPart: health
+
+  CoreHealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      ResourceId: !Ref CoreHealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: 
+          Fn::Sub: 
+            - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations"
+            - LambdaArn:
+                Fn::ImportValue: !Sub "${Environment}-visualforge-core-arn"
+
+  # Public health check under /core/api/health
+  CoreApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      ParentId:
+        Fn::ImportValue: !Sub "${Environment}-core-resource-id"
+      PathPart: api
+  
+  CoreApiHealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      ParentId: !Ref CoreApiResource
+      PathPart: health
+
+  CoreApiHealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      ResourceId: !Ref CoreApiHealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: 
+          Fn::Sub: 
+            - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations"
+            - LambdaArn:
+                Fn::ImportValue: !Sub "${Environment}-visualforge-core-arn"
+
+  # Public health check for Payments
+  PaymentsHealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      ParentId:
+        Fn::ImportValue: !Sub "${Environment}-payments-resource-id"
+      PathPart: health
+
+  PaymentsHealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      ResourceId: !Ref PaymentsHealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: 
+          Fn::Sub: 
+            - "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations"
+            - LambdaArn:
+                Fn::ImportValue: !Sub "${Environment}-visualforge-payments-api-arn"
+
+  # Redeploy API to include new health endpoints
+  ApiRedeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - CoreHealthMethod
+      - CoreApiHealthMethod
+      - PaymentsHealthMethod
+    Properties:
+      RestApiId: !Ref ApiGatewayId
+      StageName: !Ref Environment
+      Description: Added public health check endpoints
+
+Outputs:
+  HealthCheckUrls:
+    Description: Public health check endpoints
+    Value: !Sub |
+      Core: https://api-${Environment}.visualforge.ai/health
+      Core API: https://api-${Environment}.visualforge.ai/core/api/health
+      Payments: https://api-${Environment}.visualforge.ai/payments/health

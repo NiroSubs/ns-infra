@@ -1,0 +1,210 @@
+name: Deploy Infrastructure
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - staging
+    paths:
+      - 'cloudformation/**'
+      - '.github/workflows/deploy-infrastructure.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      stack_name:
+        description: 'Specific stack to deploy (optional)'
+        required: false
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+    steps:
+      - id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-core-infrastructure:
+    needs: determine-environment
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    outputs:
+      vpc-id: ${{ steps.deploy-vpc.outputs.vpc-id }}
+      database-endpoint: ${{ steps.deploy-database.outputs.database-endpoint }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy VPC and Database Stack
+        id: deploy-database
+        run: |
+          # Skip if specific stack requested and this isn't it
+          if [[ -n "${{ inputs.stack_name }}" && "${{ inputs.stack_name }}" != "database" ]]; then
+            echo "Skipping database stack"
+            exit 0
+          fi
+          
+          aws cloudformation deploy \
+            --template-file cloudformation/templates/database.yaml \
+            --stack-name ${{ needs.determine-environment.outputs.environment }}-nirosubs-database \
+            --parameter-overrides \
+              Environment=${{ needs.determine-environment.outputs.environment }} \
+              MasterPassword=${{ secrets.DB_MASTER_PASSWORD }} \
+              DatabaseName=nirosubs \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy Cognito Stack
+        id: deploy-cognito
+        run: |
+          # Skip if specific stack requested and this isn't it
+          if [[ -n "${{ inputs.stack_name }}" && "${{ inputs.stack_name }}" != "cognito" ]]; then
+            echo "Skipping cognito stack"
+            exit 0
+          fi
+          
+          aws cloudformation deploy \
+            --template-file cloudformation/templates/cognito-real.yaml \
+            --stack-name ${{ needs.determine-environment.outputs.environment }}-nirosubs-cognito \
+            --parameter-overrides \
+              Environment=${{ needs.determine-environment.outputs.environment }} \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+      - name: Deploy Lambda Execution Role
+        run: |
+          # Skip if specific stack requested and this isn't it
+          if [[ -n "${{ inputs.stack_name }}" && "${{ inputs.stack_name }}" != "lambda-role" ]]; then
+            echo "Skipping lambda role stack"
+            exit 0
+          fi
+          
+          aws cloudformation deploy \
+            --template-file cloudformation/templates/lambda-execution-role.yaml \
+            --stack-name ${{ needs.determine-environment.outputs.environment }}-nirosubs-lambda-role \
+            --parameter-overrides \
+              Environment=${{ needs.determine-environment.outputs.environment }} \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset
+
+  deploy-api-gateway:
+    needs: [determine-environment, deploy-core-infrastructure]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    outputs:
+      api-url: ${{ steps.deploy-api.outputs.url }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Deploy API Gateway
+        id: deploy-api
+        run: |
+          # Skip if specific stack requested and this isn't it
+          if [[ -n "${{ inputs.stack_name }}" && "${{ inputs.stack_name }}" != "api-gateway" ]]; then
+            echo "Skipping API Gateway stack"
+            exit 0
+          fi
+          
+          aws cloudformation deploy \
+            --template-file cloudformation/templates/api-gateway-with-lambda.yaml \
+            --stack-name ${{ needs.determine-environment.outputs.environment }}-nirosubs-api \
+            --parameter-overrides \
+              Environment=${{ needs.determine-environment.outputs.environment }} \
+              AuthLambdaArn=arn:aws:lambda:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:function:${{ needs.determine-environment.outputs.environment }}-ns-auth-lambda \
+              UserLambdaArn=arn:aws:lambda:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:function:${{ needs.determine-environment.outputs.environment }}-ns-user-lambda \
+              DashboardLambdaArn=arn:aws:lambda:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:function:${{ needs.determine-environment.outputs.environment }}-ns-dashboard-lambda \
+              PaymentsLambdaArn=arn:aws:lambda:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:function:${{ needs.determine-environment.outputs.environment }}-ns-payments-lambda \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+          
+          # Get API URL
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.determine-environment.outputs.environment }}-nirosubs-api \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" \
+            --output text)
+          
+          echo "url=$API_URL" >> $GITHUB_OUTPUT
+          echo "API Gateway URL: $API_URL"
+
+  deploy-frontend-hosting:
+    needs: [determine-environment]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy S3 and CloudFront for Frontend
+        run: |
+          # Skip if specific stack requested and this isn't it
+          if [[ -n "${{ inputs.stack_name }}" && "${{ inputs.stack_name }}" != "frontend-hosting" ]]; then
+            echo "Skipping frontend hosting stack"
+            exit 0
+          fi
+          
+          aws cloudformation deploy \
+            --template-file cloudformation/templates/frontend-hosting.yaml \
+            --stack-name ${{ needs.determine-environment.outputs.environment }}-nirosubs-frontend \
+            --parameter-overrides \
+              Environment=${{ needs.determine-environment.outputs.environment }} \
+            --capabilities CAPABILITY_IAM \
+            --no-fail-on-empty-changeset
+
+  notify-deployment:
+    needs: [determine-environment, deploy-core-infrastructure, deploy-api-gateway, deploy-frontend-hosting]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Send deployment notification
+        run: |
+          if [[ "${{ needs.deploy-core-infrastructure.result }}" == "success" && "${{ needs.deploy-api-gateway.result }}" == "success" ]]; then
+            echo "✅ Infrastructure deployment to ${{ needs.determine-environment.outputs.environment }} completed successfully!"
+            echo "🌐 API URL: ${{ needs.deploy-api-gateway.outputs.api-url }}"
+          else
+            echo "❌ Infrastructure deployment to ${{ needs.determine-environment.outputs.environment }} failed!"
+          fi

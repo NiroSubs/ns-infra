@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VisualForge AI - Simple SES Configuration'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+  # IAM Role for Lambda to send emails
+  EmailLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SESPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: '*'
+
+  # Lambda function for sending emails
+  EmailFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-visualforge-email'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt EmailLambdaRole.Arn
+      Code:
+        ZipFile: |
+          const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
+          const ses = new SESClient({ region: process.env.AWS_REGION });
+          
+          exports.handler = async (event) => {
+            const body = JSON.parse(event.body || '{}');
+            
+            const command = new SendEmailCommand({
+              Source: 'noreply@visualforge.ai',
+              Destination: { ToAddresses: [body.to] },
+              Message: {
+                Subject: { Data: body.subject },
+                Body: {
+                  Html: { Data: body.html || '<p>No content</p>' },
+                  Text: { Data: body.text || 'No content' }
+                }
+              }
+            });
+            
+            try {
+              const result = await ses.send(command);
+              return {
+                statusCode: 200,
+                headers: { 'Access-Control-Allow-Origin': '*' },
+                body: JSON.stringify({ success: true, messageId: result.MessageId })
+              };
+            } catch (error) {
+              return {
+                statusCode: 500,
+                headers: { 'Access-Control-Allow-Origin': '*' },
+                body: JSON.stringify({ error: error.message })
+              };
+            }
+          };
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Timeout: 30
+
+  # API Gateway integration
+  EmailApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !ImportValue 
+        Fn::Sub: '${Environment}-visualforge-api-id'
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/${EmailFunction.Arn}/invocations'
+
+  EmailApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !ImportValue 
+        Fn::Sub: '${Environment}-visualforge-api-id'
+      RouteKey: 'POST /email/send'
+      Target: !Sub 'integrations/${EmailApiIntegration}'
+
+  EmailApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EmailFunction
+      Principal: apigateway.amazonaws.com
+      Action: lambda:InvokeFunction
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/*'
+
+Outputs:
+  EmailFunctionArn:
+    Value: !GetAtt EmailFunction.Arn
+    Export:
+      Name: !Sub '${Environment}-email-function-arn'

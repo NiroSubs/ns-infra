@@ -1,0 +1,47 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ACM SSL Certificate for VisualForge domains'
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Base domain name
+  
+  HostedZoneId:
+    Type: String
+    Default: Z015790023056BKZ15UTB
+    Description: Route53 Hosted Zone ID
+
+Resources:
+  # Wildcard certificate for all subdomains
+  WildcardCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub '*.${DomainName}'
+      SubjectAlternativeNames:
+        - !Ref DomainName
+        - !Sub '*.${DomainName}'
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+        - DomainName: !Sub '*.${DomainName}'
+          HostedZoneId: !Ref HostedZoneId
+      ValidationMethod: DNS
+      Tags:
+        - Key: Name
+          Value: visualforge-wildcard-cert
+        - Key: Project
+          Value: VisualForge
+
+Outputs:
+  CertificateArn:
+    Description: ACM Certificate ARN
+    Value: !Ref WildcardCertificate
+    Export:
+      Name: visualforge-cert-arn
+  
+  CertificateDomain:
+    Description: Certificate Domain
+    Value: !Sub '*.${DomainName}'
+    Export:
+      Name: visualforge-cert-domain

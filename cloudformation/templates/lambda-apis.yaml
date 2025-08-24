@@ -1,0 +1,398 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda API functions for VisualForge AI microservices
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  CognitoUserPoolId:
+    Type: String
+    Description: Cognito User Pool ID for authentication
+
+  DatabaseSecretArn:
+    Type: String
+    Description: ARN of the database credentials secret
+
+  StripeSecretArn:
+    Type: String
+    Description: ARN of the Stripe API keys secret
+
+Resources:
+  # ==================== Lambda Execution Role ====================
+  
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-visualforge-lambda-api-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DatabaseSecretArn
+                  - !Ref StripeSecretArn
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Environment}-*
+
+  # ==================== Lambda Layer for Dependencies ====================
+  
+  LambdaDependenciesLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub ${Environment}-visualforge-dependencies
+      Description: Shared dependencies for Lambda functions
+      Content:
+        S3Bucket: !Sub ${Environment}-visualforge-lambda-code
+        S3Key: layers/dependencies.zip
+      CompatibleRuntimes:
+        - nodejs18.x
+
+  # ==================== User API Lambda ====================
+  
+  UserApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-user-api
+      Description: User management API
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Code:
+        S3Bucket: !Sub ${Environment}-visualforge-lambda-code
+        S3Key: functions/user-api.zip
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          USER_POOL_ID: !Ref CognitoUserPoolId
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          NODE_ENV: production
+      Layers:
+        - !Ref LambdaDependenciesLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      ReservedConcurrentExecutions: 10
+
+  UserApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${UserApiFunction}
+      RetentionInDays: 7
+
+  # ==================== Dashboard API Lambda ====================
+  
+  DashboardApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-dashboard-api
+      Description: Dashboard data API
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Code:
+        S3Bucket: !Sub ${Environment}-visualforge-lambda-code
+        S3Key: functions/dashboard-api.zip
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          USER_POOL_ID: !Ref CognitoUserPoolId
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          NODE_ENV: production
+      Layers:
+        - !Ref LambdaDependenciesLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      ReservedConcurrentExecutions: 10
+
+  DashboardApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${DashboardApiFunction}
+      RetentionInDays: 7
+
+  # ==================== Payments API Lambda ====================
+  
+  PaymentsApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-payments-api
+      Description: Payment processing API
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Code:
+        S3Bucket: !Sub ${Environment}-visualforge-lambda-code
+        S3Key: functions/payments-api.zip
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          USER_POOL_ID: !Ref CognitoUserPoolId
+          DATABASE_SECRET_ARN: !Ref DatabaseSecretArn
+          STRIPE_SECRET_ARN: !Ref StripeSecretArn
+          NODE_ENV: production
+      Layers:
+        - !Ref LambdaDependenciesLayer
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      ReservedConcurrentExecutions: 10
+
+  PaymentsApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${PaymentsApiFunction}
+      RetentionInDays: 7
+
+  # ==================== API Gateway ====================
+  
+  ApiGateway:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${Environment}-visualforge-api
+      Description: VisualForge AI API Gateway
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        MaxAge: 86400
+
+  # ==================== API Gateway Integrations ====================
+  
+  UserApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+        - LambdaArn: !GetAtt UserApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  DashboardApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+        - LambdaArn: !GetAtt DashboardApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  PaymentsApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaArn}/invocations
+        - LambdaArn: !GetAtt PaymentsApiFunction.Arn
+      PayloadFormatVersion: '2.0'
+
+  # ==================== API Gateway Routes ====================
+  
+  # User API Routes
+  UserApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: ANY /api/user/{proxy+}
+      Target: !Sub integrations/${UserApiIntegration}
+
+  UserApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: GET /api/user/health
+      Target: !Sub integrations/${UserApiIntegration}
+
+  # Dashboard API Routes
+  DashboardApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: ANY /api/dashboard/{proxy+}
+      Target: !Sub integrations/${DashboardApiIntegration}
+
+  DashboardApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: GET /api/dashboard/health
+      Target: !Sub integrations/${DashboardApiIntegration}
+
+  # Payments API Routes
+  PaymentsApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: ANY /api/payments/{proxy+}
+      Target: !Sub integrations/${PaymentsApiIntegration}
+
+  PaymentsApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: GET /api/payments/health
+      Target: !Sub integrations/${PaymentsApiIntegration}
+
+  # ==================== API Gateway Stage ====================
+  
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ApiGateway
+      StageName: !Ref Environment
+      AutoDeploy: true
+      AccessLogSettings:
+        DestinationArn: !GetAtt ApiLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength"}'
+
+  ApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${Environment}-visualforge-api
+      RetentionInDays: 7
+
+  # ==================== Lambda Permissions ====================
+  
+  UserApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt UserApiFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+  DashboardApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt DashboardApiFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+  PaymentsApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt PaymentsApiFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+  # ==================== CloudWatch Alarms ====================
+  
+  UserApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-user-api-errors
+      AlarmDescription: User API Lambda function errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref UserApiFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DashboardApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-dashboard-api-errors
+      AlarmDescription: Dashboard API Lambda function errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DashboardApiFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  PaymentsApiErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-payments-api-errors
+      AlarmDescription: Payments API Lambda function errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref PaymentsApiFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub ${Environment}-api-endpoint
+
+  UserApiFunctionArn:
+    Description: User API Lambda function ARN
+    Value: !GetAtt UserApiFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-user-api-arn
+
+  DashboardApiFunctionArn:
+    Description: Dashboard API Lambda function ARN
+    Value: !GetAtt DashboardApiFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-dashboard-api-arn
+
+  PaymentsApiFunctionArn:
+    Description: Payments API Lambda function ARN
+    Value: !GetAtt PaymentsApiFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-payments-api-arn

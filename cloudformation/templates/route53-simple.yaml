@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Simple Route53 DNS configuration for vf-dev'
+
+Parameters:
+  HostedZoneId:
+    Type: String
+    Default: Z015790023056BKZ15UTB
+    Description: Route53 Hosted Zone ID
+  
+  CloudFrontDomain:
+    Type: String
+    Default: d2nsuzyev8ci1a.cloudfront.net
+    Description: CloudFront distribution domain
+
+Resources:
+  # Dev subdomain
+  DevMainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: dev.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDomain
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront Hosted Zone ID
+        EvaluateTargetHealth: false
+
+  # App dev subdomain
+  AppDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: app-dev.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDomain
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  # Media dev subdomain
+  MediaDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: media-dev.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDomain
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  # API dev subdomain (update existing CNAME)
+  ApiDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: api-dev.visualforge.ai
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - ky4hqo8j67.execute-api.us-east-1.amazonaws.com
+
+  # Auth dev subdomain
+  AuthDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: auth-dev.visualforge.ai
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - visualforge-auth-816454053517.auth.us-east-1.amazoncognito.com
+
+Outputs:
+  DevURL:
+    Description: Development URL
+    Value: https://dev.visualforge.ai
+  
+  AppDevURL:
+    Description: App Development URL
+    Value: https://app-dev.visualforge.ai
+  
+  ApiDevURL:
+    Description: API Development URL
+    Value: https://api-dev.visualforge.ai
+  
+  AuthDevURL:
+    Description: Auth Development URL
+    Value: https://auth-dev.visualforge.ai

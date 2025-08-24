@@ -1,0 +1,1001 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Tenant-level cost monitoring infrastructure for VisualForge AI with budget management and cross-account aggregation
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  MasterAccountId:
+    Type: String
+    Default: "816454053517"
+    Description: AWS account ID for centralized billing
+  
+  DefaultMarkupPercentage:
+    Type: Number
+    Default: 30
+    MinValue: 0
+    MaxValue: 100
+    Description: Default markup percentage on AWS costs
+  
+  CostDataRetentionDays:
+    Type: Number
+    Default: 90
+    MinValue: 30
+    MaxValue: 365
+    Description: Days to retain cost data in DynamoDB
+  
+  AlertEmail:
+    Type: String
+    Default: admin@visualforge.ai
+    Description: Email for SaaS-level cost alerts
+  
+  DailyReportHourUTC:
+    Type: Number
+    Default: 2
+    MinValue: 0
+    MaxValue: 23
+    Description: UTC hour to run daily cost collection (2 = 10 PM ET)
+
+Resources:
+  # ================== DynamoDB Tables ==================
+  
+  TenantCostTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Environment}-visualforge-tenant-costs
+      BillingMode: PAY_PER_REQUEST
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1pk
+          AttributeType: S
+        - AttributeName: gsi1sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: gsi1pk
+              KeyType: HASH
+            - AttributeName: gsi1sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        Enabled: true
+        AttributeName: ttl
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: CostMonitoring
+
+  BudgetConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Environment}-visualforge-budget-configs
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: CostMonitoring
+
+  # ================== S3 Bucket for Cost Reports ==================
+  
+  CostReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Environment}-visualforge-cost-reports-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldReports
+            Status: Enabled
+            ExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: CostMonitoring
+
+  # ================== SNS Topics ==================
+  
+  TenantBudgetAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${Environment}-tenant-budget-alerts
+      DisplayName: Tenant Budget Alerts
+      KmsMasterKeyId: alias/aws/sns
+
+  SaaSCostAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${Environment}-saas-cost-alerts
+      DisplayName: SaaS Cost Alerts
+      KmsMasterKeyId: alias/aws/sns
+      Subscription:
+        - Endpoint: !Ref AlertEmail
+          Protocol: email
+
+  SystemAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${Environment}-cost-system-alerts
+      DisplayName: Cost System Alerts
+      KmsMasterKeyId: alias/aws/sns
+
+  # ================== IAM Roles ==================
+  
+  CostCollectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-cost-collector-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CostCollectorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ce:GetCostAndUsage
+                  - ce:GetCostAndUsageWithResources
+                  - ce:GetTags
+                  - ce:GetDimensionValues
+                  - ce:GetCostCategories
+                  - ce:GetCostForecast
+                  - organizations:ListAccounts
+                  - organizations:DescribeAccount
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:BatchWriteItem
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt TenantCostTable.Arn
+                  - !Sub "${TenantCostTable.Arn}/index/*"
+                  - !GetAtt BudgetConfigTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${CostReportsBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref SystemAlertsTopic
+                  - !Ref SaaSCostAlertsTopic
+              - Effect: Allow
+                Action:
+                  - sts:AssumeRole
+                Resource: !Sub "arn:aws:iam::${MasterAccountId}:role/${Environment}-cost-reader-role"
+
+  BudgetMonitorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-budget-monitor-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: BudgetMonitorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt TenantCostTable.Arn
+                  - !Sub "${TenantCostTable.Arn}/index/*"
+                  - !GetAtt BudgetConfigTable.Arn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref TenantBudgetAlertsTopic
+                  - !Ref SaaSCostAlertsTopic
+                  - !Ref SystemAlertsTopic
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminUpdateUserAttributes
+                  - cognito-idp:AdminDisableUser
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "cognito-idp:ResourceTag/Environment": !Ref Environment
+
+  CostAPIRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-cost-api-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CostAPIPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt TenantCostTable.Arn
+                  - !Sub "${TenantCostTable.Arn}/index/*"
+                  - !GetAtt BudgetConfigTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${CostReportsBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - ce:GetCostForecast
+                Resource: "*"
+
+  # ================== Lambda Functions ==================
+  
+  CostCollectorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-cost-collector
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt CostCollectorRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          COST_TABLE: !Ref TenantCostTable
+          BUDGET_TABLE: !Ref BudgetConfigTable
+          REPORTS_BUCKET: !Ref CostReportsBucket
+          DEFAULT_MARKUP: !Ref DefaultMarkupPercentage
+          RETENTION_DAYS: !Ref CostDataRetentionDays
+          MASTER_ACCOUNT_ID: !Ref MasterAccountId
+          SAAS_ALERTS_TOPIC: !Ref SaaSCostAlertsTopic
+          SYSTEM_ALERTS_TOPIC: !Ref SystemAlertsTopic
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import json
+          import datetime
+          from datetime import timezone, timedelta
+          from decimal import Decimal
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          ce = boto3.client('ce')
+          dynamodb = boto3.resource('dynamodb')
+          s3 = boto3.client('s3')
+          sns = boto3.client('sns')
+          sts = boto3.client('sts')
+
+          COST_TABLE = os.environ['COST_TABLE']
+          BUDGET_TABLE = os.environ['BUDGET_TABLE']
+          REPORTS_BUCKET = os.environ['REPORTS_BUCKET']
+          DEFAULT_MARKUP = float(os.environ['DEFAULT_MARKUP'])
+          RETENTION_DAYS = int(os.environ['RETENTION_DAYS'])
+          MASTER_ACCOUNT_ID = os.environ['MASTER_ACCOUNT_ID']
+          SAAS_ALERTS_TOPIC = os.environ['SAAS_ALERTS_TOPIC']
+
+          cost_table = dynamodb.Table(COST_TABLE)
+          budget_table = dynamodb.Table(BUDGET_TABLE)
+
+          def decimal_default(obj):
+              if isinstance(obj, Decimal):
+                  return float(obj)
+              raise TypeError
+
+          def get_team_markup(team_id):
+              try:
+                  response = budget_table.get_item(
+                      Key={'pk': f'TEAM#{team_id}', 'sk': 'BUDGET#CONFIG'}
+                  )
+                  if 'Item' in response:
+                      return float(response['Item'].get('markup', DEFAULT_MARKUP))
+              except Exception as e:
+                  logger.error(f"Error getting markup for team {team_id}: {e}")
+              return DEFAULT_MARKUP
+
+          def collect_costs_by_tag(start_date, end_date):
+              try:
+                  response = ce.get_cost_and_usage(
+                      TimePeriod={'Start': start_date, 'End': end_date},
+                      Granularity='DAILY',
+                      Metrics=['UnblendedCost', 'UsageQuantity'],
+                      GroupBy=[
+                          {'Type': 'TAG', 'Key': 'Team'},
+                          {'Type': 'DIMENSION', 'Key': 'SERVICE'}
+                      ],
+                      Filter={
+                          'Tags': {
+                              'Key': 'Team',
+                              'Values': ['*'],
+                              'MatchOptions': ['ABSENT']
+                          }
+                      }
+                  )
+                  return response['ResultsByTime']
+              except Exception as e:
+                  logger.error(f"Error collecting costs: {e}")
+                  raise
+
+          def store_cost_data(cost_data, date_str):
+              batch_items = []
+              ttl = int((datetime.datetime.now() + timedelta(days=RETENTION_DAYS)).timestamp())
+              
+              for result in cost_data:
+                  for group in result['Groups']:
+                      tags = {kv['Key']: kv['Value'] for kv in group['Keys'] if kv['Type'] == 'TAG'}
+                      dimensions = {kv['Key']: kv['Value'] for kv in group['Keys'] if kv['Type'] == 'DIMENSION'}
+                      
+                      team_id = tags.get('Team', 'untagged')
+                      service = dimensions.get('SERVICE', 'unknown')
+                      raw_cost = float(group['Metrics']['UnblendedCost']['Amount'])
+                      
+                      if raw_cost <= 0:
+                          continue
+                      
+                      markup = get_team_markup(team_id)
+                      total_cost = raw_cost * (1 + markup / 100)
+                      
+                      item = {
+                          'pk': f'TEAM#{team_id}',
+                          'sk': f'COST#{date_str}#{service}',
+                          'gsi1pk': f'DATE#{date_str}',
+                          'gsi1sk': f'TEAM#{team_id}#{service}',
+                          'date': date_str,
+                          'teamId': team_id,
+                          'service': service,
+                          'rawCost': Decimal(str(raw_cost)),
+                          'markup': Decimal(str(markup)),
+                          'totalCost': Decimal(str(total_cost)),
+                          'ttl': ttl,
+                          'timestamp': datetime.datetime.now(timezone.utc).isoformat()
+                      }
+                      
+                      batch_items.append(item)
+                      
+                      if len(batch_items) >= 25:
+                          write_batch(batch_items)
+                          batch_items = []
+              
+              if batch_items:
+                  write_batch(batch_items)
+
+          def write_batch(items):
+              try:
+                  with cost_table.batch_writer() as batch:
+                      for item in items:
+                          batch.put_item(Item=item)
+              except Exception as e:
+                  logger.error(f"Error writing batch: {e}")
+                  raise
+
+          def update_aggregated_metrics(date_str):
+              try:
+                  # Calculate MTD for each team
+                  month_start = date_str[:7] + '-01'
+                  
+                  response = cost_table.query(
+                      IndexName='GSI1',
+                      KeyConditionExpression='gsi1pk = :pk AND gsi1sk BETWEEN :start AND :end',
+                      ExpressionAttributeValues={
+                          ':pk': f'DATE#{date_str}',
+                          ':start': 'TEAM#',
+                          ':end': 'TEAM#~'
+                      }
+                  )
+                  
+                  team_totals = {}
+                  for item in response['Items']:
+                      team_id = item['teamId']
+                      if team_id not in team_totals:
+                          team_totals[team_id] = {'raw': 0, 'total': 0}
+                      team_totals[team_id]['raw'] += float(item['rawCost'])
+                      team_totals[team_id]['total'] += float(item['totalCost'])
+                  
+                  # Store aggregated metrics
+                  for team_id, totals in team_totals.items():
+                      cost_table.put_item(Item={
+                          'pk': f'METRICS#{date_str}',
+                          'sk': f'TEAM#{team_id}',
+                          'dailyCost': Decimal(str(totals['total'])),
+                          'dailyRawCost': Decimal(str(totals['raw'])),
+                          'timestamp': datetime.datetime.now(timezone.utc).isoformat()
+                      })
+                  
+                  # Global metrics
+                  global_total = sum(t['total'] for t in team_totals.values())
+                  global_raw = sum(t['raw'] for t in team_totals.values())
+                  
+                  cost_table.put_item(Item={
+                      'pk': f'METRICS#{date_str}',
+                      'sk': 'GLOBAL',
+                      'dailyCost': Decimal(str(global_total)),
+                      'dailyRawCost': Decimal(str(global_raw)),
+                      'totalTeams': len(team_totals),
+                      'timestamp': datetime.datetime.now(timezone.utc).isoformat()
+                  })
+                  
+                  return global_total, global_raw
+                  
+              except Exception as e:
+                  logger.error(f"Error updating metrics: {e}")
+                  raise
+
+          def generate_daily_report(date_str, total_cost, raw_cost):
+              try:
+                  report = {
+                      'date': date_str,
+                      'totalCost': float(total_cost),
+                      'rawCost': float(raw_cost),
+                      'totalMarkup': float(total_cost - raw_cost),
+                      'averageMarkup': ((total_cost / raw_cost - 1) * 100) if raw_cost > 0 else 0,
+                      'timestamp': datetime.datetime.now(timezone.utc).isoformat()
+                  }
+                  
+                  # Store in S3
+                  s3.put_object(
+                      Bucket=REPORTS_BUCKET,
+                      Key=f'daily-reports/{date_str}.json',
+                      Body=json.dumps(report, default=decimal_default),
+                      ContentType='application/json'
+                  )
+                  
+                  # Send summary to SNS
+                  message = f"""
+                  Daily Cost Report - {date_str}
+                  
+                  AWS Costs: ${raw_cost:.2f}
+                  Service Fees: ${total_cost - raw_cost:.2f}
+                  Total Billed: ${total_cost:.2f}
+                  Average Markup: {report['averageMarkup']:.1f}%
+                  """
+                  
+                  sns.publish(
+                      TopicArn=SAAS_ALERTS_TOPIC,
+                      Subject=f'Daily Cost Report - {date_str}',
+                      Message=message
+                  )
+                  
+              except Exception as e:
+                  logger.error(f"Error generating report: {e}")
+
+          def handler(event, context):
+              try:
+                  # Get yesterday's date
+                  yesterday = datetime.datetime.now(timezone.utc).date() - timedelta(days=1)
+                  date_str = yesterday.isoformat()
+                  
+                  logger.info(f"Collecting costs for {date_str}")
+                  
+                  # Collect costs
+                  cost_data = collect_costs_by_tag(date_str, 
+                                                   (yesterday + timedelta(days=1)).isoformat())
+                  
+                  # Store in DynamoDB
+                  store_cost_data(cost_data, date_str)
+                  
+                  # Update aggregated metrics
+                  total_cost, raw_cost = update_aggregated_metrics(date_str)
+                  
+                  # Generate daily report
+                  generate_daily_report(date_str, total_cost, raw_cost)
+                  
+                  logger.info(f"Successfully processed costs for {date_str}")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'date': date_str,
+                          'totalCost': float(total_cost),
+                          'rawCost': float(raw_cost)
+                      }, default=decimal_default)
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error in cost collector: {e}")
+                  sns.publish(
+                      TopicArn=os.environ['SYSTEM_ALERTS_TOPIC'],
+                      Subject='Cost Collector Error',
+                      Message=f'Error collecting costs for {date_str}: {str(e)}'
+                  )
+                  raise
+
+  BudgetMonitorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-budget-monitor
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt BudgetMonitorRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          COST_TABLE: !Ref TenantCostTable
+          BUDGET_TABLE: !Ref BudgetConfigTable
+          TENANT_ALERTS_TOPIC: !Ref TenantBudgetAlertsTopic
+          SAAS_ALERTS_TOPIC: !Ref SaaSCostAlertsTopic
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import json
+          import datetime
+          from datetime import timezone, timedelta
+          from decimal import Decimal
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          dynamodb = boto3.resource('dynamodb')
+          sns = boto3.client('sns')
+          cognito = boto3.client('cognito-idp')
+
+          COST_TABLE = os.environ['COST_TABLE']
+          BUDGET_TABLE = os.environ['BUDGET_TABLE']
+          TENANT_ALERTS_TOPIC = os.environ['TENANT_ALERTS_TOPIC']
+          SAAS_ALERTS_TOPIC = os.environ['SAAS_ALERTS_TOPIC']
+
+          cost_table = dynamodb.Table(COST_TABLE)
+          budget_table = dynamodb.Table(BUDGET_TABLE)
+
+          def get_month_to_date_cost(team_id):
+              try:
+                  today = datetime.datetime.now(timezone.utc).date()
+                  month_start = today.replace(day=1).isoformat()
+                  
+                  response = cost_table.query(
+                      KeyConditionExpression='pk = :pk AND sk BETWEEN :start AND :end',
+                      ExpressionAttributeValues={
+                          ':pk': f'TEAM#{team_id}',
+                          ':start': f'COST#{month_start}',
+                          ':end': f'COST#{today.isoformat()}~'
+                      }
+                  )
+                  
+                  total = sum(float(item['totalCost']) for item in response['Items'])
+                  return total
+                  
+              except Exception as e:
+                  logger.error(f"Error getting MTD cost for {team_id}: {e}")
+                  return 0
+
+          def check_budget(team_id, budget_config, current_spend):
+              alerts = []
+              monthly_limit = float(budget_config.get('monthlyLimit', 0))
+              thresholds = budget_config.get('alertThresholds', [50, 80, 100])
+              auto_suspend = budget_config.get('autoSuspend', False)
+              suspend_threshold = float(budget_config.get('suspendThreshold', 150))
+              
+              if monthly_limit <= 0:
+                  return alerts, False
+              
+              percentage = (current_spend / monthly_limit) * 100
+              
+              # Check alert thresholds
+              for threshold in thresholds:
+                  if percentage >= threshold:
+                      # Check if already alerted (store in budget config)
+                      alert_key = f'alert_{threshold}'
+                      if not budget_config.get(alert_key):
+                          alerts.append({
+                              'teamId': team_id,
+                              'threshold': threshold,
+                              'percentage': percentage,
+                              'currentSpend': current_spend,
+                              'limit': monthly_limit
+                          })
+                          # Mark as alerted
+                          budget_table.update_item(
+                              Key={'pk': f'TEAM#{team_id}', 'sk': 'BUDGET#CONFIG'},
+                              UpdateExpression=f'SET {alert_key} = :true',
+                              ExpressionAttributeValues={':true': True}
+                          )
+              
+              # Check auto-suspend
+              should_suspend = False
+              if auto_suspend and percentage >= suspend_threshold:
+                  should_suspend = True
+              
+              return alerts, should_suspend
+
+          def send_alerts(alerts):
+              for alert in alerts:
+                  message = f"""
+                  Budget Alert for Team: {alert['teamId']}
+                  
+                  Current Spend: ${alert['currentSpend']:.2f}
+                  Budget Limit: ${alert['limit']:.2f}
+                  Usage: {alert['percentage']:.1f}%
+                  Threshold Exceeded: {alert['threshold']}%
+                  
+                  Please review your usage to avoid service interruption.
+                  """
+                  
+                  sns.publish(
+                      TopicArn=TENANT_ALERTS_TOPIC,
+                      Subject=f"Budget Alert: Team {alert['teamId']} at {alert['percentage']:.1f}%",
+                      Message=message,
+                      MessageAttributes={
+                          'teamId': {'DataType': 'String', 'StringValue': alert['teamId']}
+                      }
+                  )
+
+          def suspend_team(team_id):
+              try:
+                  # Implementation depends on your suspension strategy
+                  # Option 1: Disable Cognito users
+                  # Option 2: Set flag in database
+                  # Option 3: Update API Gateway authorizer
+                  
+                  logger.info(f"Suspending team {team_id} due to budget exceeded")
+                  
+                  # Set suspension flag in budget config
+                  budget_table.update_item(
+                      Key={'pk': f'TEAM#{team_id}', 'sk': 'BUDGET#CONFIG'},
+                      UpdateExpression='SET suspended = :true, suspendedAt = :now',
+                      ExpressionAttributeValues={
+                          ':true': True,
+                          ':now': datetime.datetime.now(timezone.utc).isoformat()
+                      }
+                  )
+                  
+                  # Send notification
+                  sns.publish(
+                      TopicArn=SAAS_ALERTS_TOPIC,
+                      Subject=f"Team Suspended: {team_id}",
+                      Message=f"Team {team_id} has been suspended due to exceeding budget threshold"
+                  )
+                  
+              except Exception as e:
+                  logger.error(f"Error suspending team {team_id}: {e}")
+
+          def handler(event, context):
+              try:
+                  # Get all budget configurations
+                  response = budget_table.scan(
+                      FilterExpression='sk = :sk',
+                      ExpressionAttributeValues={':sk': 'BUDGET#CONFIG'}
+                  )
+                  
+                  all_alerts = []
+                  teams_to_suspend = []
+                  
+                  for config in response['Items']:
+                      team_id = config['pk'].split('#')[1]
+                      
+                      # Reset daily alert flags at start of month
+                      today = datetime.datetime.now(timezone.utc).date()
+                      if today.day == 1:
+                          # Reset alert flags
+                          budget_table.update_item(
+                              Key={'pk': config['pk'], 'sk': config['sk']},
+                              UpdateExpression='REMOVE alert_50, alert_80, alert_100'
+                          )
+                      
+                      # Get current spend
+                      current_spend = get_month_to_date_cost(team_id)
+                      
+                      # Check budget
+                      alerts, should_suspend = check_budget(team_id, config, current_spend)
+                      all_alerts.extend(alerts)
+                      
+                      if should_suspend:
+                          teams_to_suspend.append(team_id)
+                  
+                  # Send alerts
+                  if all_alerts:
+                      send_alerts(all_alerts)
+                  
+                  # Suspend teams if needed
+                  for team_id in teams_to_suspend:
+                      suspend_team(team_id)
+                  
+                  logger.info(f"Budget monitor completed: {len(all_alerts)} alerts, {len(teams_to_suspend)} suspensions")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'alerts': len(all_alerts),
+                          'suspensions': len(teams_to_suspend)
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Error in budget monitor: {e}")
+                  raise
+
+  # ================== EventBridge Rules ==================
+  
+  DailyCostCollectionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${Environment}-daily-cost-collection
+      Description: Trigger daily cost collection at 2 AM UTC
+      ScheduleExpression: !Sub "cron(0 ${DailyReportHourUTC} * * ? *)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CostCollectorFunction.Arn
+          Id: CostCollectorTarget
+
+  CostCollectorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CostCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DailyCostCollectionRule.Arn
+
+  HourlyBudgetMonitorRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${Environment}-hourly-budget-monitor
+      Description: Check budgets every hour
+      ScheduleExpression: "rate(1 hour)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt BudgetMonitorFunction.Arn
+          Id: BudgetMonitorTarget
+
+  BudgetMonitorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref BudgetMonitorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HourlyBudgetMonitorRule.Arn
+
+  # ================== CloudWatch Dashboard ==================
+  
+  CostMonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${Environment}-VisualForge-Cost-Monitoring
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 2,
+              "properties": {
+                "markdown": "# VisualForge Cost Monitoring\n**Environment:** ${Environment} | **Updated:** Every hour\n\nThis dashboard shows tenant-level cost tracking with markup, budget status, and SaaS-wide metrics."
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 2,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "Lambda Execution Success Rate",
+                "metrics": [
+                  [ "AWS/Lambda", "Errors", { "stat": "Sum", "label": "Errors" } ],
+                  [ ".", "Invocations", { "stat": "Sum", "label": "Invocations" } ]
+                ],
+                "period": 3600,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 2,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "DynamoDB Consumed Capacity",
+                "metrics": [
+                  [ "AWS/DynamoDB", "ConsumedReadCapacityUnits", { "stat": "Sum", "dimensions": { "TableName": "${TenantCostTable}" } } ],
+                  [ ".", "ConsumedWriteCapacityUnits", { "stat": "Sum", "dimensions": { "TableName": "${TenantCostTable}" } } ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 2,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "title": "SNS Notifications Sent",
+                "metrics": [
+                  [ "AWS/SNS", "NumberOfMessagesPublished", { "stat": "Sum", "dimensions": { "TopicName": "${TenantBudgetAlertsTopic.TopicName}" }, "label": "Tenant Alerts" } ],
+                  [ "...", { "dimensions": { "TopicName": "${SaaSCostAlertsTopic.TopicName}" }, "label": "SaaS Alerts" } ]
+                ],
+                "period": 3600,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0,
+              "y": 8,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/lambda/${Environment}-cost-collector' | fields @timestamp, @message | sort @timestamp desc | limit 100",
+                "region": "${AWS::Region}",
+                "title": "Recent Cost Collection Logs"
+              }
+            }
+          ]
+        }
+
+  # ================== Cost Categories ==================
+  
+  # Note: AWS::CE::CostCategory is not available in all regions
+  # Commenting out for now as it's optional for the core functionality
+  # TeamCostCategory:
+  #   Type: AWS::CE::CostCategory
+  #   Properties:
+  #     Name: !Sub ${Environment}-team-costs
+  #     RuleVersion: CostCategoryExpression.v1
+
+  # ================== CloudWatch Alarms ==================
+  
+  CostCollectorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-cost-collector-errors
+      AlarmDescription: Alert when cost collector Lambda fails
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref CostCollectorFunction
+      AlarmActions:
+        - !Ref SystemAlertsTopic
+
+  BudgetMonitorErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-budget-monitor-errors
+      AlarmDescription: Alert when budget monitor Lambda fails
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref BudgetMonitorFunction
+      AlarmActions:
+        - !Ref SystemAlertsTopic
+
+Outputs:
+  CostTableName:
+    Description: DynamoDB table for tenant cost data
+    Value: !Ref TenantCostTable
+    Export:
+      Name: !Sub ${Environment}-cost-table
+
+  BudgetTableName:
+    Description: DynamoDB table for budget configurations
+    Value: !Ref BudgetConfigTable
+    Export:
+      Name: !Sub ${Environment}-budget-table
+
+  ReportsBucketName:
+    Description: S3 bucket for cost reports
+    Value: !Ref CostReportsBucket
+    Export:
+      Name: !Sub ${Environment}-reports-bucket
+
+  TenantAlertsTopicArn:
+    Description: SNS topic for tenant budget alerts
+    Value: !Ref TenantBudgetAlertsTopic
+    Export:
+      Name: !Sub ${Environment}-tenant-alerts-topic
+
+  SaaSAlertsTopicArn:
+    Description: SNS topic for SaaS-level cost alerts
+    Value: !Ref SaaSCostAlertsTopic
+    Export:
+      Name: !Sub ${Environment}-saas-alerts-topic
+
+  CostCollectorFunctionArn:
+    Description: Cost collector Lambda function ARN
+    Value: !GetAtt CostCollectorFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-cost-collector-arn
+
+  BudgetMonitorFunctionArn:
+    Description: Budget monitor Lambda function ARN
+    Value: !GetAtt BudgetMonitorFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-budget-monitor-arn
+
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${Environment}-VisualForge-Cost-Monitoring

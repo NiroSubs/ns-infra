@@ -1,0 +1,78 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Configure Google OAuth for Cognito User Pool'
+
+Parameters:
+  UserPoolId:
+    Type: String
+    Default: us-east-1_H9ZWvtTNg
+    Description: Existing Cognito User Pool ID
+    
+  GoogleClientId:
+    Type: String
+    NoEcho: true
+    Description: Google OAuth Client ID from Google Cloud Console
+    
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Description: Google OAuth Client Secret from Google Cloud Console
+
+Resources:
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Properties:
+      UserPoolId: !Ref UserPoolId
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: "openid email profile"
+      AttributeMapping:
+        email: email
+        name: name
+        picture: picture
+        username: sub
+        email_verified: email_verified
+        
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPoolId
+      ClientName: GoogleOAuthClient
+      GenerateSecret: false
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+        - aws.cognito.signin.user.admin
+      CallbackURLs:
+        - https://dev.visualforge.ai/callback
+        - http://localhost:5176/callback
+      LogoutURLs:
+        - https://dev.visualforge.ai
+        - http://localhost:5176
+      SupportedIdentityProviders:
+        - Google
+        - COGNITO
+      AllowedOAuthFlowsUserPoolClient: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_CUSTOM_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      PreventUserExistenceErrors: ENABLED
+      
+Outputs:
+  GoogleClientId:
+    Description: Google OAuth Client ID for frontend
+    Value: !Ref GoogleClientId
+    
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID with Google support
+    Value: !Ref UserPoolClient
+    Export:
+      Name: cognito-google-client-id

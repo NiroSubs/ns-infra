@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Master stack for VisualForge AI - Complete serverless SaaS platform with cost monitoring
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Base domain name
+  
+  CertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:816454053517:certificate/d9e2c7df-9e19-4b6d-965d-7fda4eab40c3
+    Description: ACM certificate ARN for domain
+  
+  AlertEmail:
+    Type: String
+    Default: admin@visualforge.ai
+    Description: Email for system alerts
+  
+  DefaultMarkupPercentage:
+    Type: Number
+    Default: 30
+    MinValue: 0
+    MaxValue: 100
+    Description: Default markup percentage on AWS costs for tenant billing
+
+Resources:
+  # ================== Database Stack ==================
+  DatabaseStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./database.yaml
+      Parameters:
+        Environment: !Ref Environment
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: Database
+
+  # ================== Cognito Authentication Stack ==================
+  CognitoStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./cognito.yaml
+      Parameters:
+        Environment: !Ref Environment
+        DomainName: !Ref DomainName
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: Authentication
+
+  # ================== Lambda Functions Stack ==================
+  LambdaStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: 
+      - DatabaseStack
+      - CognitoStack
+    Properties:
+      TemplateURL: ./lambda.yaml
+      Parameters:
+        Environment: !Ref Environment
+        DatabaseClusterArn: !GetAtt DatabaseStack.Outputs.ClusterArn
+        DatabaseSecretArn: !GetAtt DatabaseStack.Outputs.SecretArn
+        UserPoolId: !GetAtt CognitoStack.Outputs.UserPoolId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: Lambda
+
+  # ================== API Gateway Stack ==================
+  ApiGatewayStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - LambdaStack
+      - CognitoStack
+    Properties:
+      TemplateURL: ./api-gateway.yaml
+      Parameters:
+        Environment: !Ref Environment
+        DomainName: !Ref DomainName
+        CertificateArn: !Ref CertificateArn
+        UserPoolArn: !GetAtt CognitoStack.Outputs.UserPoolArn
+        CoreFunctionArn: !GetAtt LambdaStack.Outputs.CoreFunctionArn
+        AuthFunctionArn: !GetAtt LambdaStack.Outputs.AuthFunctionArn
+        PaymentFunctionArn: !GetAtt LambdaStack.Outputs.PaymentFunctionArn
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: API
+
+  # ================== Cost Monitoring Stack ==================
+  CostMonitoringStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - DatabaseStack
+      - ApiGatewayStack
+    Properties:
+      TemplateURL: ./cost-monitoring.yaml
+      Parameters:
+        Environment: !Ref Environment
+        MasterAccountId: !Ref AWS::AccountId
+        DefaultMarkupPercentage: !Ref DefaultMarkupPercentage
+        CostDataRetentionDays: 90
+        AlertEmail: !Ref AlertEmail
+        DailyReportHourUTC: 2
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: CostMonitoring
+
+  # ================== CloudFront Distribution ==================
+  CloudFrontStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: ApiGatewayStack
+    Properties:
+      TemplateURL: ./cloudfront.yaml
+      Parameters:
+        Environment: !Ref Environment
+        DomainName: !Ref DomainName
+        CertificateArn: !Ref CertificateArn
+        ApiDomainName: !GetAtt ApiGatewayStack.Outputs.ApiDomainName
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: CDN
+
+  # ================== Monitoring and Alarms Stack ==================
+  MonitoringStack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - LambdaStack
+      - DatabaseStack
+      - CostMonitoringStack
+    Properties:
+      TemplateURL: ./monitoring.yaml
+      Parameters:
+        Environment: !Ref Environment
+        AlertEmail: !Ref AlertEmail
+        CoreFunctionName: !GetAtt LambdaStack.Outputs.CoreFunctionName
+        DatabaseClusterIdentifier: !GetAtt DatabaseStack.Outputs.ClusterIdentifier
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Component
+          Value: Monitoring
+
+  # ================== Master Dashboard ==================
+  MasterDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${Environment}-VisualForge-Master
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "text",
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 1,
+              "properties": {
+                "markdown": "# VisualForge AI - ${Environment} Environment\n**Stack Status** | [Database](${DatabaseStack.Outputs.DashboardURL}) | [API Gateway](${ApiGatewayStack.Outputs.ApiEndpoint}) | [Cost Monitoring](${CostMonitoringStack.Outputs.DashboardURL})"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 1,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                "title": "API Requests",
+                "metrics": [
+                  [ "AWS/ApiGateway", "Count", { "stat": "Sum", "label": "Total Requests" } ],
+                  [ ".", "4XXError", { "stat": "Sum", "label": "4XX Errors" } ],
+                  [ ".", "5XXError", { "stat": "Sum", "label": "5XX Errors" } ]
+                ],
+                "period": 300,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 6,
+              "y": 1,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                "title": "Lambda Performance",
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", { "stat": "Sum" } ],
+                  [ ".", "Errors", { "stat": "Sum" } ],
+                  [ ".", "Duration", { "stat": "Average" } ]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 1,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                "title": "Database Connections",
+                "metrics": [
+                  [ "AWS/RDS", "DatabaseConnections", { "stat": "Average", "dimensions": { "DBClusterIdentifier": "${DatabaseStack.Outputs.ClusterIdentifier}" } } ]
+                ],
+                "period": 300,
+                "stat": "Average",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 18,
+              "y": 1,
+              "width": 6,
+              "height": 6,
+              "properties": {
+                "title": "Cost Monitoring Status",
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", { "stat": "Sum", "dimensions": { "FunctionName": "${CostMonitoringStack.Outputs.CostCollectorFunctionName}" }, "label": "Cost Collections" } ],
+                  [ ".", "Errors", { "stat": "Sum", "dimensions": { "FunctionName": "${CostMonitoringStack.Outputs.CostCollectorFunctionName}" }, "label": "Collection Errors" } ]
+                ],
+                "period": 86400,
+                "stat": "Sum",
+                "region": "${AWS::Region}"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  EnvironmentName:
+    Description: Environment name
+    Value: !Ref Environment
+    Export:
+      Name: !Sub ${AWS::StackName}-Environment
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !GetAtt ApiGatewayStack.Outputs.ApiEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-ApiEndpoint
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !GetAtt CognitoStack.Outputs.UserPoolId
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolId
+
+  UserPoolClientId:
+    Description: Cognito User Pool Client ID
+    Value: !GetAtt CognitoStack.Outputs.UserPoolClientId
+    Export:
+      Name: !Sub ${AWS::StackName}-UserPoolClientId
+
+  DatabaseClusterEndpoint:
+    Description: Aurora cluster endpoint
+    Value: !GetAtt DatabaseStack.Outputs.ClusterEndpoint
+    Export:
+      Name: !Sub ${AWS::StackName}-DatabaseEndpoint
+
+  CostTableName:
+    Description: DynamoDB table for cost data
+    Value: !GetAtt CostMonitoringStack.Outputs.CostTableName
+    Export:
+      Name: !Sub ${AWS::StackName}-CostTable
+
+  BudgetTableName:
+    Description: DynamoDB table for budget configs
+    Value: !GetAtt CostMonitoringStack.Outputs.BudgetTableName
+    Export:
+      Name: !Sub ${AWS::StackName}-BudgetTable
+
+  TenantAlertsTopicArn:
+    Description: SNS topic for tenant budget alerts
+    Value: !GetAtt CostMonitoringStack.Outputs.TenantAlertsTopicArn
+    Export:
+      Name: !Sub ${AWS::StackName}-TenantAlertsTopic
+
+  MasterDashboardURL:
+    Description: Master CloudWatch Dashboard URL
+    Value: !Sub https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${Environment}-VisualForge-Master
+    Export:
+      Name: !Sub ${AWS::StackName}-MasterDashboard
+
+  CloudFrontDistribution:
+    Description: CloudFront distribution domain
+    Value: !GetAtt CloudFrontStack.Outputs.DistributionDomain
+    Export:
+      Name: !Sub ${AWS::StackName}-CloudFrontDomain
+
+  DeploymentInstructions:
+    Description: Post-deployment instructions
+    Value: |
+      1. Confirm SNS email subscriptions for cost alerts
+      2. Enable Cost Explorer API (if not already enabled)
+      3. Activate cost allocation tags (Team, Environment, Feature, User)
+      4. Deploy Lambda function code using deployment scripts
+      5. Configure initial team budgets in DynamoDB
+      6. Access dashboard at the MasterDashboardURL output

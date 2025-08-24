@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VisualForge AI - Simple Cognito User Pool'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, staging, prod]
+    Description: Environment name
+
+Resources:
+  # User Pool - Real Authentication
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${Environment}-visualforge-users'
+      
+      # Email configuration
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      AutoVerifiedAttributes:
+        - email
+      
+      # Username configuration
+      UsernameAttributes:
+        - email
+      AliasAttributes:
+        - email
+        
+      # Password policy
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          
+      # Account recovery
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+            
+      # User attributes
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+          
+      # MFA off for dev
+      MfaConfiguration: 'OFF'
+        
+      # Device tracking
+      DeviceConfiguration:
+        ChallengeRequiredOnNewDevice: false
+        DeviceOnlyRememberedOnUserPrompt: true
+          
+      # Tags
+      UserPoolTags:
+        Environment: !Ref Environment
+        Service: VisualForge
+        Authentication: Real
+
+  # User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${Environment}-visualforge-web-client'
+      UserPoolId: !Ref UserPool
+      
+      # Authentication flows
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH  # For testing
+        
+      # Token configuration
+      AccessTokenValidity: 1  # 1 hour
+      IdTokenValidity: 1      # 1 hour
+      RefreshTokenValidity: 30 # 30 days
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+        
+      # Prevent user existence errors
+      PreventUserExistenceErrors: ENABLED
+      
+      # OAuth configuration (optional)
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - !Sub 'https://app-${Environment}.visualforge.ai/callback'
+        - 'http://localhost:5173/callback'  # Local development
+      LogoutURLs:
+        - !Sub 'https://app-${Environment}.visualforge.ai'
+        - 'http://localhost:5173'
+      SupportedIdentityProviders:
+        - COGNITO
+        
+      # Read/Write attributes
+      ReadAttributes:
+        - email
+        - email_verified
+        - name
+        - sub
+      WriteAttributes:
+        - email
+        - name
+
+  # User Pool Domain (for hosted UI)
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${Environment}-visualforge-auth-${AWS::AccountId}'
+      UserPoolId: !Ref UserPool
+
+  # Admin Group
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admins
+      UserPoolId: !Ref UserPool
+      Description: Administrator users with full access
+      Precedence: 1
+
+  # Developer Group (for testing)
+  DeveloperGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Developers
+      UserPoolId: !Ref UserPool
+      Description: Developer users for testing
+      Precedence: 2
+
+  # Regular Users Group
+  UsersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Users
+      UserPoolId: !Ref UserPool
+      Description: Regular application users
+      Precedence: 3
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${Environment}-cognito-user-pool-id'
+      
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Sub '${Environment}-cognito-user-pool-arn'
+      
+  ClientId:
+    Description: Cognito Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${Environment}-cognito-client-id'
+      
+  UserPoolDomain:
+    Description: Cognito Hosted UI Domain
+    Value: !Sub 'https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub '${Environment}-cognito-domain'

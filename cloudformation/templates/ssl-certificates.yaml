@@ -1,0 +1,72 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SSL certificates for VisualForge.ai custom domains'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Root domain name
+
+  HostedZoneId:
+    Type: String
+    Description: Route 53 Hosted Zone ID for the domain
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+  IsDev: !Equals [!Ref Environment, dev]
+
+Resources:
+  # Wildcard SSL Certificate for all subdomains
+  WildcardCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub "*.${DomainName}"
+      SubjectAlternativeNames:
+        - !Ref DomainName  # Root domain
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub "*.${DomainName}"
+          HostedZoneId: !Ref HostedZoneId
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub "${Environment}-wildcard-certificate"
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  WildcardCertificateArn:
+    Description: Wildcard SSL certificate ARN for all subdomains
+    Value: !Ref WildcardCertificate
+    Export:
+      Name: !Sub "${Environment}-wildcard-certificate-arn"
+
+  ApiDomainName:
+    Description: API domain name
+    Value: !If
+      - IsProd
+      - !Sub "api.${DomainName}"
+      - !Sub "api-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-api-domain-name"
+
+  FrontendDomainName:
+    Description: Frontend domain name
+    Value: !If
+      - IsProd
+      - !Sub "app.${DomainName}"
+      - !Sub "app-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-frontend-domain-name"
+
+  DomainName:
+    Description: Root domain name
+    Value: !Ref DomainName
+    Export:
+      Name: !Sub "${Environment}-domain-name"

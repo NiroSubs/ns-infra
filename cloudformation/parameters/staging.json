@@ -1,0 +1,30 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "staging"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "staging.visualforge.ai"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:us-east-1:816454053517:certificate/staging-cert-id"
+  },
+  {
+    "ParameterKey": "UserPoolId",
+    "ParameterValue": "us-east-1_H9ZWvtTNg"
+  },
+  {
+    "ParameterKey": "ClientId",
+    "ParameterValue": "1nufa1so5bp1rjki3td1rr2f49"
+  },
+  {
+    "ParameterKey": "ApiGatewayUrl",
+    "ParameterValue": "https://api-staging.visualforge.ai"
+  },
+  {
+    "ParameterKey": "S3BucketName",
+    "ParameterValue": "staging-nirosubs-frontend"
+  }
+]

@@ -1,0 +1,200 @@
+name: Deploy Services
+
+on:
+  repository_dispatch:
+    types: [deploy-service]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      service:
+        description: 'Service to deploy'
+        required: true
+        type: choice
+        options:
+          - auth
+          - user
+          - dashboard
+          - payments
+          - all
+
+env:
+  AWS_REGION: us-east-1
+  NODE_VERSION: '18'
+
+jobs:
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.set-env.outputs.environment }}
+      service: ${{ steps.set-service.outputs.service }}
+    steps:
+      - id: set-env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "environment=${{ github.event.client_payload.environment }}" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+          fi
+
+      - id: set-service
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "service=${{ inputs.service }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "service=${{ github.event.client_payload.service }}" >> $GITHUB_OUTPUT
+          else
+            echo "service=all" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-deploy-lambdas:
+    needs: determine-environment
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    strategy:
+      matrix:
+        service:
+          - name: auth
+            repo: ns-auth
+          - name: user
+            repo: ns-user
+          - name: dashboard
+            repo: ns-dashboard
+          - name: payments
+            repo: ns-payments
+    
+    steps:
+      - name: Check if service should be deployed
+        id: should-deploy
+        run: |
+          SERVICE_TO_DEPLOY="${{ needs.determine-environment.outputs.service }}"
+          CURRENT_SERVICE="${{ matrix.service.name }}"
+          
+          if [[ "$SERVICE_TO_DEPLOY" == "all" || "$SERVICE_TO_DEPLOY" == "$CURRENT_SERVICE" ]]; then
+            echo "deploy=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy=false" >> $GITHUB_OUTPUT
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.should-deploy.outputs.deploy == 'true'
+        with:
+          repository: ${{ github.repository_owner }}/${{ matrix.service.repo }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ matrix.service.repo }}
+      
+      - name: Setup Node.js
+        if: steps.should-deploy.outputs.deploy == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: ${{ matrix.service.repo }}/backend/package-lock.json
+      
+      - name: Configure AWS credentials
+        if: steps.should-deploy.outputs.deploy == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Install dependencies
+        if: steps.should-deploy.outputs.deploy == 'true'
+        working-directory: ${{ matrix.service.repo }}/backend
+        run: |
+          npm ci --production
+          npm prune --production
+      
+      - name: Package Lambda function
+        if: steps.should-deploy.outputs.deploy == 'true'
+        working-directory: ${{ matrix.service.repo }}/backend
+        run: |
+          zip -r lambda-${{ matrix.service.name }}.zip . -x "*.git*" -x "*.test.*" -x "tests/*" -x "*.md" -x "*.yml"
+      
+      - name: Deploy Lambda function
+        if: steps.should-deploy.outputs.deploy == 'true'
+        working-directory: ${{ matrix.service.repo }}/backend
+        run: |
+          FUNCTION_NAME="${{ needs.determine-environment.outputs.environment }}-ns-${{ matrix.service.name }}-lambda"
+          
+          # Check if function exists
+          if aws lambda get-function --function-name $FUNCTION_NAME 2>/dev/null; then
+            echo "Updating existing function..."
+            aws lambda update-function-code \
+              --function-name $FUNCTION_NAME \
+              --zip-file fileb://lambda-${{ matrix.service.name }}.zip
+            
+            # Wait for update to complete
+            aws lambda wait function-updated \
+              --function-name $FUNCTION_NAME
+            
+            # Update configuration
+            aws lambda update-function-configuration \
+              --function-name $FUNCTION_NAME \
+              --runtime nodejs18.x \
+              --timeout 30 \
+              --memory-size 512 \
+              --environment Variables="{
+                NODE_ENV=${{ needs.determine-environment.outputs.environment }},
+                REGION=${{ env.AWS_REGION }},
+                DB_SECRET_ARN=${{ secrets.DB_SECRET_ARN }},
+                COGNITO_USER_POOL_ID=${{ secrets.COGNITO_USER_POOL_ID }},
+                COGNITO_CLIENT_ID=${{ secrets.COGNITO_CLIENT_ID }}
+              }"
+          else
+            echo "Creating new function..."
+            aws lambda create-function \
+              --function-name $FUNCTION_NAME \
+              --runtime nodejs18.x \
+              --role arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ needs.determine-environment.outputs.environment }}-nirosubs-lambda-role \
+              --handler index.handler \
+              --zip-file fileb://lambda-${{ matrix.service.name }}.zip \
+              --timeout 30 \
+              --memory-size 512 \
+              --environment Variables="{
+                NODE_ENV=${{ needs.determine-environment.outputs.environment }},
+                REGION=${{ env.AWS_REGION }},
+                DB_SECRET_ARN=${{ secrets.DB_SECRET_ARN }},
+                COGNITO_USER_POOL_ID=${{ secrets.COGNITO_USER_POOL_ID }},
+                COGNITO_CLIENT_ID=${{ secrets.COGNITO_CLIENT_ID }}
+              }"
+          fi
+          
+          # Publish version
+          VERSION=$(aws lambda publish-version --function-name $FUNCTION_NAME --query Version --output text)
+          echo "Published version: $VERSION"
+          
+          # Create or update alias
+          aws lambda update-alias \
+            --function-name $FUNCTION_NAME \
+            --name ${{ needs.determine-environment.outputs.environment }} \
+            --function-version $VERSION \
+            2>/dev/null || \
+          aws lambda create-alias \
+            --function-name $FUNCTION_NAME \
+            --name ${{ needs.determine-environment.outputs.environment }} \
+            --function-version $VERSION
+
+  trigger-infrastructure-update:
+    needs: [determine-environment, build-and-deploy-lambdas]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Trigger API Gateway update
+        run: |
+          # Trigger infrastructure workflow to update API Gateway with new Lambda ARNs
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/deploy-infrastructure.yml/dispatches \
+            -d '{"ref":"${{ github.ref }}","inputs":{"environment":"${{ needs.determine-environment.outputs.environment }}","stack_name":"api-gateway"}}'

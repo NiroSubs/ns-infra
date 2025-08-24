@@ -1,0 +1,314 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VisualForge AI - Real Cognito User Pool (No Mocks)'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, test, staging, prod]
+    Description: Environment name
+
+Resources:
+  # User Pool - Real Authentication
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${Environment}-visualforge-users'
+      
+      # Email configuration
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      AutoVerifiedAttributes:
+        - email
+      
+      # Username configuration
+      UsernameAttributes:
+        - email
+      AliasAttributes:
+        - email
+        
+      # Password policy
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          
+      # Account recovery
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+            
+      # User attributes
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+          
+      # MFA (optional for dev, required for prod)
+      MfaConfiguration: !If
+        - IsProduction
+        - OPTIONAL
+        - 'OFF'
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+        
+      # Device tracking
+      DeviceConfiguration:
+        ChallengeRequiredOnNewDevice: false
+        DeviceOnlyRememberedOnUserPrompt: true
+        
+      # Lambda triggers (optional - removed for now)
+          
+      # Tags
+      UserPoolTags:
+        Environment: !Ref Environment
+        Service: VisualForge
+        Authentication: Real
+
+  # User Pool Client
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub '${Environment}-visualforge-web-client'
+      UserPoolId: !Ref UserPool
+      
+      # Authentication flows
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH  # For testing
+        
+      # Token configuration
+      AccessTokenValidity: 1  # 1 hour
+      IdTokenValidity: 1      # 1 hour
+      RefreshTokenValidity: 30 # 30 days
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+        
+      # Prevent user existence errors
+      PreventUserExistenceErrors: ENABLED
+      
+      # OAuth configuration (optional)
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+      CallbackURLs:
+        - !Sub 'https://app-${Environment}.visualforge.ai/callback'
+        - 'http://localhost:5173/callback'  # Local development
+      LogoutURLs:
+        - !Sub 'https://app-${Environment}.visualforge.ai'
+        - 'http://localhost:5173'
+      SupportedIdentityProviders:
+        - COGNITO
+        
+      # Read/Write attributes
+      ReadAttributes:
+        - email
+        - email_verified
+        - name
+        - sub
+      WriteAttributes:
+        - email
+        - name
+
+  # User Pool Domain (for hosted UI)
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${Environment}-visualforge-auth'
+      UserPoolId: !Ref UserPool
+
+  # Admin Group
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admins
+      UserPoolId: !Ref UserPool
+      Description: Administrator users with full access
+      Precedence: 1
+
+  # Developer Group (for testing)
+  DeveloperGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Developers
+      UserPoolId: !Ref UserPool
+      Description: Developer users for testing
+      Precedence: 2
+
+  # Regular Users Group
+  UsersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Users
+      UserPoolId: !Ref UserPool
+      Description: Regular application users
+      Precedence: 3
+
+  # Test Users (only in dev/test environments)
+  TestUserCreation:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: IsTestEnvironment
+    Properties:
+      ServiceToken: !GetAtt CreateTestUsersFunction.Arn
+      UserPoolId: !Ref UserPool
+      ClientId: !Ref UserPoolClient
+      TestUsers:
+        - Email: test-user-1@visualforge.ai
+          Password: TestUser123!
+          Name: Test User 1
+        - Email: test-admin@visualforge.ai
+          Password: TestAdmin123!
+          Name: Test Admin
+          Groups: [Admins]
+        - Email: test-developer@visualforge.ai
+          Password: TestDev123!
+          Name: Test Developer
+          Groups: [Developers]
+
+  # Lambda for creating test users
+  CreateTestUsersFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsTestEnvironment
+    Properties:
+      FunctionName: !Sub '${Environment}-create-test-users'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt CreateTestUsersRole.Arn
+      Code:
+        ZipFile: |
+          const { CognitoIdentityProviderClient, AdminCreateUserCommand, AdminSetUserPasswordCommand, AdminAddUserToGroupCommand } = require('@aws-sdk/client-cognito-identity-provider');
+          const response = require('cfn-response');
+          
+          exports.handler = async (event, context) => {
+            const cognito = new CognitoIdentityProviderClient();
+            
+            if (event.RequestType === 'Delete') {
+              await response.send(event, context, response.SUCCESS, {});
+              return;
+            }
+            
+            try {
+              const { UserPoolId, TestUsers } = event.ResourceProperties;
+              
+              for (const user of TestUsers) {
+                // Create user
+                await cognito.send(new AdminCreateUserCommand({
+                  UserPoolId,
+                  Username: user.Email,
+                  UserAttributes: [
+                    { Name: 'email', Value: user.Email },
+                    { Name: 'name', Value: user.Name },
+                    { Name: 'email_verified', Value: 'true' }
+                  ],
+                  MessageAction: 'SUPPRESS'
+                }));
+                
+                // Set permanent password
+                await cognito.send(new AdminSetUserPasswordCommand({
+                  UserPoolId,
+                  Username: user.Email,
+                  Password: user.Password,
+                  Permanent: true
+                }));
+                
+                // Add to groups
+                if (user.Groups) {
+                  for (const group of user.Groups) {
+                    await cognito.send(new AdminAddUserToGroupCommand({
+                      UserPoolId,
+                      Username: user.Email,
+                      GroupName: group
+                    }));
+                  }
+                }
+              }
+              
+              await response.send(event, context, response.SUCCESS, { Message: 'Test users created' });
+            } catch (error) {
+              console.error(error);
+              await response.send(event, context, response.FAILED, { Error: error.message });
+            }
+          };
+      Timeout: 60
+
+  CreateTestUsersRole:
+    Type: AWS::IAM::Role
+    Condition: IsTestEnvironment
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoManagement
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminAddUserToGroup
+                Resource: !GetAtt UserPool.Arn
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prod]
+  IsTestEnvironment: !Or
+    - !Equals [!Ref Environment, dev]
+    - !Equals [!Ref Environment, test]
+  HasPreSignUpLambda: !Equals [true, false]  # Set to true when lambda is ready
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${Environment}-cognito-user-pool-id'
+      
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Sub '${Environment}-cognito-user-pool-arn'
+      
+  ClientId:
+    Description: Cognito Client ID
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${Environment}-cognito-client-id'
+      
+  UserPoolDomain:
+    Description: Cognito Hosted UI Domain
+    Value: !Sub 'https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub '${Environment}-cognito-domain'
+      
+  TestUsers:
+    Condition: IsTestEnvironment
+    Description: Test user credentials (REAL Cognito users)
+    Value: |
+      test-user-1@visualforge.ai / TestUser123!
+      test-admin@visualforge.ai / TestAdmin123!
+      test-developer@visualforge.ai / TestDev123!

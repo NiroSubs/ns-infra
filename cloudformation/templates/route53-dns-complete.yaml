@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete Route53 DNS configuration for VisualForge'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prod]
+    Description: Environment name
+  
+  HostedZoneId:
+    Type: String
+    Default: Z015790023056BKZ15UTB
+    Description: Route53 Hosted Zone ID for visualforge.ai
+  
+  CloudFrontDistributionDomainName:
+    Type: String
+    Description: CloudFront distribution domain name
+  
+  ApiGatewayDomainName:
+    Type: String
+    Description: API Gateway domain name
+  
+  CognitoUserPoolDomain:
+    Type: String
+    Description: Cognito User Pool domain
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prod]
+  IsNotProduction: !Not [!Equals [!Ref Environment, prod]]
+
+Resources:
+  # Main application domain
+  MainDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If 
+        - IsProduction
+        - visualforge.ai
+        - !Sub '${Environment}.visualforge.ai'
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDistributionDomainName
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront Hosted Zone ID (constant)
+        EvaluateTargetHealth: false
+
+  # WWW subdomain (production only)
+  WwwDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: IsProduction
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: www.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDistributionDomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  # App subdomain
+  AppDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProduction
+        - app.visualforge.ai
+        - !Sub 'app-${Environment}.visualforge.ai'
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDistributionDomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  # API subdomain
+  ApiDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProduction
+        - api.visualforge.ai
+        - !Sub 'api-${Environment}.visualforge.ai'
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !Ref ApiGatewayDomainName
+
+  # Auth subdomain
+  AuthDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProduction
+        - auth.visualforge.ai
+        - !Sub 'auth-${Environment}.visualforge.ai'
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !Sub '${CognitoUserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+
+  # Media subdomain (for VisualForgeMedia services)
+  MediaDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProduction
+        - media.visualforge.ai
+        - !Sub 'media-${Environment}.visualforge.ai'
+      Type: A
+      AliasTarget:
+        DNSName: !Ref CloudFrontDistributionDomainName
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+Outputs:
+  MainDomain:
+    Description: Main application domain
+    Value: !If
+      - IsProduction
+      - https://visualforge.ai
+      - !Sub 'https://${Environment}.visualforge.ai'
+    Export:
+      Name: main-domain-url
+  
+  AppDomain:
+    Description: App domain
+    Value: !If
+      - IsProduction
+      - https://app.visualforge.ai
+      - !Sub 'https://app-${Environment}.visualforge.ai'
+    Export:
+      Name: app-domain-url
+  
+  ApiDomain:
+    Description: API domain
+    Value: !If
+      - IsProduction
+      - https://api.visualforge.ai
+      - !Sub 'https://api-${Environment}.visualforge.ai'
+    Export:
+      Name: api-domain-url
+  
+  AuthDomain:
+    Description: Auth domain
+    Value: !If
+      - IsProduction
+      - https://auth.visualforge.ai
+      - !Sub 'https://auth-${Environment}.visualforge.ai'
+    Export:
+      Name: auth-domain-url
+  
+  MediaDomain:
+    Description: Media services domain
+    Value: !If
+      - IsProduction
+      - https://media.visualforge.ai
+      - !Sub 'https://media-${Environment}.visualforge.ai'
+    Export:
+      Name: media-domain-url

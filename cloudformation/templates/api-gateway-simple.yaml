@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: API Gateway for existing Lambda functions
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+Resources:
+  # ==================== API Gateway ====================
+  
+  ApiGateway:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub ${Environment}-visualforge-api
+      Description: VisualForge AI API Gateway
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Api-Key
+        MaxAge: 86400
+
+  # ==================== API Gateway Integrations ====================
+  
+  UserApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Environment}-visualforge-user-api/invocations
+      PayloadFormatVersion: '2.0'
+
+  DashboardApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Environment}-visualforge-dashboard-api/invocations
+      PayloadFormatVersion: '2.0'
+
+  PaymentsApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Environment}-visualforge-payments-api/invocations
+      PayloadFormatVersion: '2.0'
+
+  CoreApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Environment}-visualforge-core/invocations
+      PayloadFormatVersion: '2.0'
+
+  # ==================== API Gateway Routes ====================
+  
+  # User API Routes
+  UserApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: ANY /api/user/{proxy+}
+      Target: !Sub integrations/${UserApiIntegration}
+
+  UserApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: GET /api/user/health
+      Target: !Sub integrations/${UserApiIntegration}
+
+  # Dashboard API Routes
+  DashboardApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: ANY /api/dashboard/{proxy+}
+      Target: !Sub integrations/${DashboardApiIntegration}
+
+  DashboardApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: GET /api/dashboard/health
+      Target: !Sub integrations/${DashboardApiIntegration}
+
+  # Payments API Routes
+  PaymentsApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: ANY /api/payments/{proxy+}
+      Target: !Sub integrations/${PaymentsApiIntegration}
+
+  PaymentsApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: GET /api/payments/health
+      Target: !Sub integrations/${PaymentsApiIntegration}
+
+  # Core API Routes
+  CoreApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: ANY /api/core/{proxy+}
+      Target: !Sub integrations/${CoreApiIntegration}
+
+  CoreApiHealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: GET /api/core/health
+      Target: !Sub integrations/${CoreApiIntegration}
+
+  # ==================== API Gateway Stage ====================
+  
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ApiGateway
+      StageName: !Ref Environment
+      AutoDeploy: true
+
+  # ==================== Lambda Permissions ====================
+  
+  UserApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub ${Environment}-visualforge-user-api
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+  DashboardApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub ${Environment}-visualforge-dashboard-api
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+  PaymentsApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub ${Environment}-visualforge-payments-api
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+  CoreApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub ${Environment}-visualforge-core
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub ${Environment}-ns-api-endpoint
+
+  ApiGatewayId:
+    Description: API Gateway ID
+    Value: !Ref ApiGateway
+    Export:
+      Name: !Sub ${Environment}-ns-api-gateway-id

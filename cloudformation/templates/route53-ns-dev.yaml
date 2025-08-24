@@ -1,0 +1,210 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Route53 DNS configuration for NiroSubs services in vf-dev environment'
+
+Parameters:
+  HostedZoneId:
+    Type: String
+    Default: Z015790023056BKZ15UTB
+    Description: Route53 Hosted Zone ID for visualforge.ai
+  
+  NiroForgeApiEndpoint:
+    Type: String
+    Default: nf-api-dev.visualforge.ai
+    Description: NiroForge API endpoint for integration
+
+Resources:
+  # Development subdomain records for NiroSubs
+  NSDevMainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: ns-dev.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontInfo.Domain
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront Hosted Zone ID
+        EvaluateTargetHealth: false
+
+  NSAppDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: ns-app-dev.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontInfo.Domain
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+  NSApiDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: ns-api-dev.visualforge.ai
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt ApiGatewayInfo.Endpoint
+
+  NSAuthDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: ns-auth-dev.visualforge.ai
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !Sub 'visualforge-ns-auth-${AWS::AccountId}.auth.${AWS::Region}.amazoncognito.com'
+
+  NSDashboardDevRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: ns-dashboard-dev.visualforge.ai
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontInfo.Domain
+        HostedZoneId: Z2FDTNDATAQYW2
+        EvaluateTargetHealth: false
+
+# Custom resources to get CloudFront and API Gateway info
+  CloudFrontInfo:
+    Type: Custom::CloudFrontInfo
+    Properties:
+      ServiceToken: !GetAtt GetCloudFrontFunction.Arn
+      StackName: ns-cloudfront
+
+  ApiGatewayInfo:
+    Type: Custom::ApiGatewayInfo
+    Properties:
+      ServiceToken: !GetAtt GetApiGatewayFunction.Arn
+      ApiName: ns-api
+
+  GetCloudFrontFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GetNSCloudFrontInfo
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  cf_client = boto3.client('cloudformation')
+                  stack_name = event['ResourceProperties']['StackName']
+                  
+                  response = cf_client.describe_stacks(StackName=stack_name)
+                  outputs = response['Stacks'][0].get('Outputs', [])
+                  
+                  domain = None
+                  for output in outputs:
+                      if output['OutputKey'] == 'CloudFrontDomainName':
+                          domain = output['OutputValue']
+                          break
+                  
+                  if not domain:
+                      # Fallback to known CloudFront distribution
+                      domain = 'd2nsuzyev8ci1a.cloudfront.net'
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Domain': domain})
+              except Exception as e:
+                  # Use fallback domain on error
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Domain': 'd2nsuzyev8ci1a.cloudfront.net'})
+
+  GetApiGatewayFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: GetNSApiGatewayInfo
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      return
+                  
+                  api_client = boto3.client('apigatewayv2')
+                  api_name = event['ResourceProperties']['ApiName']
+                  
+                  response = api_client.get_apis()
+                  endpoint = None
+                  
+                  for api in response.get('Items', []):
+                      if api['Name'] == api_name:
+                          endpoint = api['ApiEndpoint'].replace('https://', '')
+                          break
+                  
+                  if not endpoint:
+                      # Fallback to known API Gateway
+                      endpoint = 'ky4hqo8j67.execute-api.us-east-1.amazonaws.com'
+                  
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Endpoint': endpoint})
+              except Exception as e:
+                  # Use fallback endpoint on error
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Endpoint': 'ky4hqo8j67.execute-api.us-east-1.amazonaws.com'})
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DescribeResources
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                  - apigatewayv2:GetApis
+                Resource: '*'
+
+Outputs:
+  NSDevDomain:
+    Description: NiroSubs development domain
+    Value: https://ns-dev.visualforge.ai
+  
+  NSAppDevDomain:
+    Description: NiroSubs app development domain
+    Value: https://ns-app-dev.visualforge.ai
+  
+  NSApiDevDomain:
+    Description: NiroSubs API development domain
+    Value: https://ns-api-dev.visualforge.ai
+  
+  NSAuthDevDomain:
+    Description: NiroSubs auth development domain
+    Value: https://ns-auth-dev.visualforge.ai
+  
+  NSDashboardDevDomain:
+    Description: NiroSubs dashboard development domain (includes NiroForge modules)
+    Value: https://ns-dashboard-dev.visualforge.ai
+  
+  NiroForgeApiIntegration:
+    Description: NiroForge API endpoint for integration
+    Value: !Ref NiroForgeApiEndpoint
+    
+  IntegrationNote:
+    Description: Architecture note
+    Value: "NiroForge services are integrated as microfrontends within the NiroSubs dashboard"

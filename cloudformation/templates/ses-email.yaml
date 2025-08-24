@@ -1,0 +1,334 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'VisualForge AI - SES Email Service Configuration'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Domain name for sending emails
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for bounce/complaint notifications
+    Default: admin@visualforge.ai
+
+Resources:
+  # SES Configuration Set
+  EmailConfigurationSet:
+    Type: AWS::SES::ConfigurationSet
+    Properties:
+      Name: !Sub '${Environment}-visualforge-config-set'
+      ReputationOptions:
+        ReputationMetricsEnabled: true
+      SendingOptions:
+        SendingEnabled: true
+      SuppressionOptions:
+        SuppressedReasons:
+          - BOUNCE
+          - COMPLAINT
+
+  # Event destination for tracking
+  EmailEventDestination:
+    Type: AWS::SES::ConfigurationSetEventDestination
+    Properties:
+      ConfigurationSetName: !Ref EmailConfigurationSet
+      EventDestination:
+        Name: !Sub '${Environment}-email-events'
+        Enabled: true
+        CloudWatchDestination:
+          DimensionConfigurations:
+            - DimensionName: MessageTag
+              DimensionValueSource: messageTag
+              DefaultDimensionValue: none
+        MatchingEventTypes:
+          - send
+          - bounce
+          - complaint
+          - delivery
+          - reject
+          - open
+          - click
+
+  # SNS Topic for bounces and complaints
+  EmailNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub '${Environment} VisualForge Email Notifications'
+      TopicName: !Sub '${Environment}-visualforge-email-notifications'
+      Subscription:
+        - Endpoint: !Ref NotificationEmail
+          Protocol: email
+
+  # Email templates
+  WelcomeEmailTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: !Sub '${Environment}-welcome-email'
+        SubjectPart: 'Welcome to VisualForge AI, {{name}}!'
+        HtmlPart: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+              .header { background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%); color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+              .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+              .button { display: inline-block; padding: 12px 24px; background: #3b82f6; color: white; text-decoration: none; border-radius: 6px; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>Welcome to VisualForge AI!</h1>
+              </div>
+              <div class="content">
+                <h2>Hi {{name}},</h2>
+                <p>Thank you for signing up! Your account is ready.</p>
+                <p><strong>Your Plan:</strong> {{plan}}</p>
+                <p><strong>Monthly Credits:</strong> {{credits}}</p>
+                <p>Click below to verify your email and get started:</p>
+                <p><a href="{{verificationUrl}}" class="button">Verify Email</a></p>
+                <p>Best regards,<br>The VisualForge Team</p>
+              </div>
+            </div>
+          </body>
+          </html>
+        TextPart: |
+          Welcome to VisualForge AI!
+          
+          Hi {{name}},
+          
+          Thank you for signing up! Your account is ready.
+          
+          Your Plan: {{plan}}
+          Monthly Credits: {{credits}}
+          
+          Verify your email: {{verificationUrl}}
+          
+          Best regards,
+          The VisualForge Team
+
+  PasswordResetTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: !Sub '${Environment}-password-reset'
+        SubjectPart: 'Password Reset Request - VisualForge AI'
+        HtmlPart: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+              .header { background: #fbbf24; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+              .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+              .code-box { background: white; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 8px; margin: 20px 0; border: 2px dashed #e5e7eb; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>Password Reset Request</h1>
+              </div>
+              <div class="content">
+                <p>Hi {{name}},</p>
+                <p>Use this code to reset your password:</p>
+                <div class="code-box">{{code}}</div>
+                <p>This code expires in 15 minutes.</p>
+                <p>If you didn't request this, please ignore this email.</p>
+              </div>
+            </div>
+          </body>
+          </html>
+        TextPart: |
+          Password Reset Request
+          
+          Hi {{name}},
+          
+          Use this code to reset your password: {{code}}
+          
+          This code expires in 15 minutes.
+          
+          If you didn't request this, please ignore this email.
+
+  SubscriptionConfirmedTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: !Sub '${Environment}-subscription-confirmed'
+        SubjectPart: 'Subscription Confirmed - {{planName}}'
+        HtmlPart: |
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="UTF-8">
+            <style>
+              body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+              .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+              .header { background: #10b981; color: white; padding: 30px; text-align: center; border-radius: 8px 8px 0 0; }
+              .content { background: #f9fafb; padding: 30px; border-radius: 0 0 8px 8px; }
+              .plan-box { background: white; padding: 20px; border-radius: 8px; margin: 20px 0; }
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>Subscription Confirmed!</h1>
+              </div>
+              <div class="content">
+                <p>Hi {{name}},</p>
+                <p>Your subscription is now active!</p>
+                <div class="plan-box">
+                  <h2>{{planName}} Plan</h2>
+                  <p>Price: ${{price}}/month</p>
+                  <p>Credits: {{credits}}</p>
+                  <p>Next billing: {{nextBilling}}</p>
+                </div>
+                <p>Thank you for choosing VisualForge AI!</p>
+              </div>
+            </div>
+          </body>
+          </html>
+        TextPart: |
+          Subscription Confirmed!
+          
+          Hi {{name}},
+          
+          Your subscription is now active!
+          
+          {{planName}} Plan
+          Price: ${{price}}/month
+          Credits: {{credits}}
+          Next billing: {{nextBilling}}
+          
+          Thank you for choosing VisualForge AI!
+
+  # IAM Role for Lambda to use SES
+  EmailServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${Environment}-visualforge-email-service-role'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SESAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendTemplatedEmail
+                  - ses:SendRawEmail
+                  - ses:GetTemplate
+                  - ses:ListTemplates
+                  - ses:GetIdentityVerificationAttributes
+                  - ses:GetSendQuota
+                  - ses:DescribeConfigurationSet
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${Environment}-visualforge-*'
+
+  # Lambda function for email service
+  EmailServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${Environment}-visualforge-email-service'
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt EmailServiceRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            // Placeholder - will be replaced by actual deployment
+            return {
+              statusCode: 200,
+              body: JSON.stringify({ message: 'Email service placeholder' })
+            };
+          };
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          FROM_EMAIL: !Sub 'noreply@${DomainName}'
+          REPLY_TO_EMAIL: !Sub 'support@${DomainName}'
+          CONFIGURATION_SET: !Ref EmailConfigurationSet
+      Timeout: 30
+      MemorySize: 256
+
+  # API Gateway integration for email service
+  EmailServiceApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !ImportValue 
+        Fn::Sub: '${Environment}-visualforge-api-id'
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/${EmailServiceFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  EmailServiceApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !ImportValue 
+        Fn::Sub: '${Environment}-visualforge-api-id'
+      RouteKey: 'POST /email/send'
+      Target: !Sub 'integrations/${EmailServiceApiIntegration}'
+
+  # Lambda permission for API Gateway
+  EmailServiceApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EmailServiceFunction
+      Principal: apigateway.amazonaws.com
+      Action: lambda:InvokeFunction
+      SourceArn: !Sub 
+        - 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiId}/*/*'
+        - ApiId: !ImportValue 
+            Fn::Sub: '${Environment}-visualforge-api-id'
+
+Outputs:
+  ConfigurationSetName:
+    Description: SES Configuration Set Name
+    Value: !Ref EmailConfigurationSet
+    Export:
+      Name: !Sub '${Environment}-ses-configuration-set'
+
+  EmailServiceFunctionArn:
+    Description: Email Service Lambda Function ARN
+    Value: !GetAtt EmailServiceFunction.Arn
+    Export:
+      Name: !Sub '${Environment}-email-service-arn'
+
+  EmailServiceRoleArn:
+    Description: Email Service IAM Role ARN
+    Value: !GetAtt EmailServiceRole.Arn
+    Export:
+      Name: !Sub '${Environment}-email-service-role-arn'
+
+  NotificationTopicArn:
+    Description: SNS Topic for email notifications
+    Value: !Ref EmailNotificationTopic
+    Export:
+      Name: !Sub '${Environment}-email-notification-topic'

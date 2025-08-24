@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Custom domain configuration for API Gateway and CloudFront'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Root domain name
+
+  HostedZoneId:
+    Type: String
+    Description: Route 53 Hosted Zone ID for the domain
+
+  ApiGatewayId:
+    Type: String
+    Description: API Gateway ID from api-gateway stack
+
+  CloudFrontDistributionId:
+    Type: String
+    Description: CloudFront distribution ID from frontend stack
+
+  WildcardCertificateArn:
+    Type: String
+    Description: Wildcard SSL certificate ARN for all subdomains
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # API Gateway Custom Domain
+  ApiCustomDomain:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !If
+        - IsProd
+        - !Sub "api.${DomainName}"
+        - !Sub "api-${Environment}.${DomainName}"
+      CertificateArn: !Ref WildcardCertificateArn
+      SecurityPolicy: TLS_1_2
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Name
+          Value: !Sub "${Environment}-api-custom-domain"
+        - Key: Environment
+          Value: !Ref Environment
+
+  # API Gateway Base Path Mapping
+  ApiBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref ApiCustomDomain
+      RestApiId: !Ref ApiGatewayId
+      Stage: !Ref Environment
+
+  # Route 53 Record for API Gateway
+  ApiDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "api.${DomainName}"
+        - !Sub "api-${Environment}.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiCustomDomain.RegionalDomainName
+        HostedZoneId: !GetAtt ApiCustomDomain.RegionalHostedZoneId
+
+  # Route 53 Record for CloudFront
+  FrontendDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "app.${DomainName}"
+        - !Sub "app-${Environment}.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !Sub "${CloudFrontDistributionId}.cloudfront.net"
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront hosted zone ID (constant)
+
+  # CNAME for www subdomain (CloudFront)
+  FrontendWwwDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "www.app.${DomainName}"
+        - !Sub "www.app-${Environment}.${DomainName}"
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !If
+          - IsProd
+          - !Sub "app.${DomainName}"
+          - !Sub "app-${Environment}.${DomainName}"
+
+  # Additional subdomains for different services/environments
+  AuthDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "auth.${DomainName}"
+        - !Sub "auth-${Environment}.${DomainName}"
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !If
+          - IsProd
+          - !Sub "api.${DomainName}"
+          - !Sub "api-${Environment}.${DomainName}"
+
+  DashboardDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !If
+        - IsProd
+        - !Sub "dashboard.${DomainName}"
+        - !Sub "dashboard-${Environment}.${DomainName}"
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !If
+          - IsProd
+          - !Sub "app.${DomainName}"
+          - !Sub "app-${Environment}.${DomainName}"
+
+Outputs:
+  ApiCustomDomainName:
+    Description: API Gateway custom domain name
+    Value: !Ref ApiCustomDomain
+    Export:
+      Name: !Sub "${Environment}-api-custom-domain-name"
+
+  ApiUrl:
+    Description: API base URL with custom domain
+    Value: !Sub
+      - "https://${DomainName}"
+      - DomainName: !If
+          - IsProd
+          - !Sub "api.${DomainName}"
+          - !Sub "api-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-api-url"
+
+  FrontendUrl:
+    Description: Frontend URL with custom domain
+    Value: !Sub
+      - "https://${DomainName}"
+      - DomainName: !If
+          - IsProd
+          - !Sub "app.${DomainName}"
+          - !Sub "app-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-frontend-url"
+
+  AuthUrl:
+    Description: Auth service URL
+    Value: !Sub
+      - "https://${DomainName}"
+      - DomainName: !If
+          - IsProd
+          - !Sub "auth.${DomainName}"
+          - !Sub "auth-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-auth-url"
+
+  DashboardUrl:
+    Description: Dashboard URL
+    Value: !Sub
+      - "https://${DomainName}"
+      - DomainName: !If
+          - IsProd
+          - !Sub "dashboard.${DomainName}"
+          - !Sub "dashboard-${Environment}.${DomainName}"
+    Export:
+      Name: !Sub "${Environment}-dashboard-url"

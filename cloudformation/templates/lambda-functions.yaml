@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Lambda functions for NiroSubs V2'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+
+Resources:
+  # Lambda Execution Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ns-lambda-execution-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: '*'
+        - PolicyName: SecretsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: '*'
+
+  # Core Lambda Function
+  CoreLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ns-core
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              const path = event.path || event.rawPath || '/';
+              
+              if (path.includes('/health')) {
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      body: JSON.stringify({
+                          status: 'healthy',
+                          service: 'ns-core',
+                          timestamp: new Date().toISOString(),
+                          environment: process.env.ENVIRONMENT || 'dev'
+                      })
+                  };
+              }
+              
+              return {
+                  statusCode: 200,
+                  headers: {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  body: JSON.stringify({
+                      message: 'NiroSubs Core Service',
+                      path: path,
+                      timestamp: new Date().toISOString()
+                  })
+              };
+          };
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Timeout: 30
+      MemorySize: 256
+
+  # User API Lambda Function
+  UserApiLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ns-user-api
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              const path = event.path || event.rawPath || '/';
+              
+              if (path.includes('/health')) {
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      body: JSON.stringify({
+                          status: 'healthy',
+                          service: 'ns-user-api',
+                          timestamp: new Date().toISOString()
+                      })
+                  };
+              }
+              
+              return {
+                  statusCode: 200,
+                  headers: {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  body: JSON.stringify({
+                      message: 'User API Service',
+                      path: path,
+                      timestamp: new Date().toISOString()
+                  })
+              };
+          };
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Timeout: 30
+      MemorySize: 256
+
+  # Dashboard API Lambda Function
+  DashboardApiLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ns-dashboard-api
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              const path = event.path || event.rawPath || '/';
+              
+              if (path.includes('/health')) {
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      body: JSON.stringify({
+                          status: 'healthy',
+                          service: 'ns-dashboard-api',
+                          timestamp: new Date().toISOString()
+                      })
+                  };
+              }
+              
+              return {
+                  statusCode: 200,
+                  headers: {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  body: JSON.stringify({
+                      message: 'Dashboard API Service',
+                      path: path,
+                      timestamp: new Date().toISOString()
+                  })
+              };
+          };
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Timeout: 30
+      MemorySize: 256
+
+  # Payments API Lambda Function
+  PaymentsApiLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ns-payments-api
+      Runtime: nodejs18.x
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+              const path = event.path || event.rawPath || '/';
+              
+              if (path.includes('/health')) {
+                  return {
+                      statusCode: 200,
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'Access-Control-Allow-Origin': '*'
+                      },
+                      body: JSON.stringify({
+                          status: 'healthy',
+                          service: 'ns-payments-api',
+                          timestamp: new Date().toISOString()
+                      })
+                  };
+              }
+              
+              return {
+                  statusCode: 200,
+                  headers: {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  body: JSON.stringify({
+                      message: 'Payments API Service',
+                      path: path,
+                      timestamp: new Date().toISOString()
+                  })
+              };
+          };
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+      Timeout: 30
+      MemorySize: 256
+
+Outputs:
+  CoreLambdaArn:
+    Description: Core Lambda Function ARN
+    Value: !GetAtt CoreLambda.Arn
+    Export:
+      Name: ns-core-lambda-arn
+  
+  UserApiLambdaArn:
+    Description: User API Lambda Function ARN
+    Value: !GetAtt UserApiLambda.Arn
+    Export:
+      Name: ns-user-api-lambda-arn
+  
+  DashboardApiLambdaArn:
+    Description: Dashboard API Lambda Function ARN
+    Value: !GetAtt DashboardApiLambda.Arn
+    Export:
+      Name: ns-dashboard-api-lambda-arn
+  
+  PaymentsApiLambdaArn:
+    Description: Payments API Lambda Function ARN
+    Value: !GetAtt PaymentsApiLambda.Arn
+    Export:
+      Name: ns-payments-api-lambda-arn

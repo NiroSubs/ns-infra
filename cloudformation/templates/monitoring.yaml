@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'CloudWatch monitoring and alerting for VisualForge AI'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+  NotificationEmail:
+    Type: String
+    Description: Email address for CloudWatch alarms and notifications
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # SNS Topic for alerts
+  AlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${Environment}-visualforge-alerts"
+      DisplayName: VisualForge AI Alerts
+
+  # SNS Subscription for email notifications
+  EmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: email
+      TopicArn: !Ref AlertsTopic
+      Endpoint: !Ref NotificationEmail
+
+  # CloudWatch Log Groups
+  CoreServiceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Environment}-visualforge-core"
+      RetentionInDays: !If [IsProd, 30, 7]
+
+  UserApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Environment}-visualforge-user-api"
+      RetentionInDays: !If [IsProd, 30, 7]
+
+  DashboardApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Environment}-visualforge-dashboard-api"
+      RetentionInDays: !If [IsProd, 30, 7]
+
+  PaymentsApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Environment}-visualforge-payments-api"
+      RetentionInDays: !If [IsProd, 30, 7]
+
+  # CloudWatch Dashboard
+  ApplicationDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${Environment}-VisualForge-Overview"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Invocations", "FunctionName", "${Environment}-visualforge-core" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-user-api" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-dashboard-api" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-payments-api" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Invocations",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Errors", "FunctionName", "${Environment}-visualforge-core" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-user-api" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-dashboard-api" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-payments-api" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Errors",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "${Environment}-visualforge-core" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-user-api" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-dashboard-api" ],
+                  [ ".", ".", ".", "${Environment}-visualforge-payments-api" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Duration",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/RDS", "DatabaseConnections", "DBClusterIdentifier", "${Environment}-visualforge-cluster" ],
+                  [ ".", "CPUUtilization", ".", "." ],
+                  [ ".", "FreeableMemory", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Database Metrics",
+                "period": 300
+              }
+            }
+          ]
+        }
+
+  # CloudWatch Alarms
+  HighErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Environment}-VisualForge-HighErrorRate"
+      AlarmDescription: High error rate detected
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+      TreatMissingData: notBreaching
+
+  DatabaseConnectionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Environment}-VisualForge-DatabaseConnections"
+      AlarmDescription: High number of database connections
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Sub "${Environment}-visualforge-cluster"
+      AlarmActions:
+        - !Ref AlertsTopic
+      TreatMissingData: notBreaching
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Environment}-VisualForge-HighLatency"
+      AlarmDescription: High Lambda function duration
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 10000
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlertsTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Insights Queries
+  ErrorAnalysisQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub "${Environment}-VisualForge-ErrorAnalysis"
+      LogGroupNames:
+        - !Ref CoreServiceLogGroup
+        - !Ref UserApiLogGroup
+        - !Ref DashboardApiLogGroup
+        - !Ref PaymentsApiLogGroup
+      QueryString: |
+        fields @timestamp, @message, @logStream
+        | filter @message like /ERROR/
+        | sort @timestamp desc
+        | limit 100
+
+  PerformanceAnalysisQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub "${Environment}-VisualForge-PerformanceAnalysis"
+      LogGroupNames:
+        - !Ref CoreServiceLogGroup
+        - !Ref UserApiLogGroup
+        - !Ref DashboardApiLogGroup
+        - !Ref PaymentsApiLogGroup
+      QueryString: |
+        fields @timestamp, @duration, @requestId, @message
+        | filter @type = "REPORT"
+        | sort @duration desc
+        | limit 50
+
+  # X-Ray Tracing (for distributed tracing)
+  XRayTracingConfig:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Sub "${Environment}-visualforge-core"
+      MaximumEventAge: 3600
+      MaximumRetryAttempts: 2
+
+Outputs:
+  AlertsTopicArn:
+    Description: SNS Topic ARN for alerts
+    Value: !Ref AlertsTopic
+    Export:
+      Name: !Sub "${Environment}-alerts-topic-arn"
+
+  DashboardURL:
+    Description: CloudWatch Dashboard URL
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ApplicationDashboard}"
+    Export:
+      Name: !Sub "${Environment}-dashboard-url"
+
+  CoreServiceLogGroupArn:
+    Description: Core service log group ARN
+    Value: !GetAtt CoreServiceLogGroup.Arn
+    Export:
+      Name: !Sub "${Environment}-core-service-log-group-arn"

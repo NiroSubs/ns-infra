@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'SNS Topic and Lambda configuration for AWS Marketplace notifications'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    
+  MarketplaceApiLambdaArn:
+    Type: String
+    Description: ARN of the Marketplace API Lambda function
+
+Resources:
+  # SNS Topic for AWS Marketplace notifications
+  MarketplaceSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${Environment}-visualforge-marketplace-notifications'
+      DisplayName: VisualForge AWS Marketplace Notifications
+      Subscription:
+        - Endpoint: !Ref MarketplaceApiLambdaArn
+          Protocol: lambda
+      Tags:
+        - Key: Application
+          Value: VisualForge
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: MarketplaceNotifications
+
+  # Lambda permission for SNS to invoke the function
+  MarketplaceLambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MarketplaceApiLambdaArn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref MarketplaceSNSTopic
+
+  # SNS Topic Policy to allow AWS Marketplace to publish
+  MarketplaceSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref MarketplaceSNSTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAWSMarketplaceToPublish
+            Effect: Allow
+            Principal:
+              Service: aws-marketplace.amazonaws.com
+            Action:
+              - SNS:Publish
+            Resource: !Ref MarketplaceSNSTopic
+          - Sid: AllowAccountOwnerFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action:
+              - SNS:*
+            Resource: !Ref MarketplaceSNSTopic
+
+  # CloudWatch Log Group for marketplace events
+  MarketplaceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/marketplace/${Environment}-visualforge'
+      RetentionInDays: 30
+      
+  # CloudWatch Alarm for failed marketplace notifications
+  MarketplaceFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${Environment}-VisualForge-Marketplace-Failures'
+      AlarmDescription: Alert when marketplace notifications fail
+      MetricName: NumberOfNotificationsFailed
+      Namespace: AWS/SNS
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: TopicName
+          Value: !GetAtt MarketplaceSNSTopic.TopicName
+      TreatMissingData: notBreaching
+
+  # EventBridge Rule for marketplace events (optional, for additional processing)
+  MarketplaceEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub '${Environment}-visualforge-marketplace-events'
+      Description: Captures AWS Marketplace events for VisualForge
+      EventPattern:
+        source:
+          - aws.marketplace
+        detail-type:
+          - AWS Marketplace Subscription Notification
+          - AWS Marketplace Entitlement Notification
+      State: ENABLED
+      Targets:
+        - Arn: !Ref MarketplaceSNSTopic
+          Id: MarketplaceSNSTarget
+
+  # Permission for EventBridge to publish to SNS
+  EventBridgeSNSPermission:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref MarketplaceSNSTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEventBridgeToPublish
+            Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: SNS:Publish
+            Resource: !Ref MarketplaceSNSTopic
+
+Outputs:
+  MarketplaceSNSTopicArn:
+    Description: ARN of the SNS topic for marketplace notifications
+    Value: !Ref MarketplaceSNSTopic
+    Export:
+      Name: !Sub '${Environment}-marketplace-sns-topic-arn'
+      
+  MarketplaceSNSTopicName:
+    Description: Name of the SNS topic for marketplace notifications
+    Value: !GetAtt MarketplaceSNSTopic.TopicName
+    Export:
+      Name: !Sub '${Environment}-marketplace-sns-topic-name'
+      
+  SubscriptionConfirmationURL:
+    Description: Instructions for AWS Marketplace SNS subscription
+    Value: !Sub |
+      To complete AWS Marketplace integration:
+      1. Log into AWS Marketplace Management Portal
+      2. Navigate to your product settings
+      3. Add this SNS Topic ARN: ${MarketplaceSNSTopic}
+      4. AWS Marketplace will send a confirmation message
+      5. The Lambda function will auto-confirm the subscription

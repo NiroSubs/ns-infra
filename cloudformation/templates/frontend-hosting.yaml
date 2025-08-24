@@ -1,0 +1,181 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Frontend hosting infrastructure for VisualForge AI using S3 and CloudFront
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Base domain name
+
+  CertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:816454053517:certificate/d9e2c7df-9e19-4b6d-965d-7fda4eab40c3
+    Description: ARN of the wildcard SSL certificate (must be in us-east-1 for CloudFront)
+
+  HostedZoneId:
+    Type: String
+    Default: Z015790023056BKZ15UTB
+    Description: Route 53 Hosted Zone ID for the domain
+
+Mappings:
+  EnvironmentMap:
+    dev:
+      Subdomain: app-dev
+    staging:
+      Subdomain: app-staging
+    prod:
+      Subdomain: app
+
+Resources:
+  # ==================== S3 Bucket for Frontend ====================
+  
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Environment}-visualforge-frontend
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html  # For SPA routing
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3000
+
+  # ==================== S3 Bucket Policy ====================
+  
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action:
+              - s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+
+  # ==================== CloudFront Origin Access Identity ====================
+  
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub OAI for ${Environment}-visualforge-frontend
+
+  # ==================== CloudFront Distribution ====================
+  
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub Frontend distribution for ${Environment}.visualforge.ai
+        Enabled: true
+        HttpVersion: http2
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100  # US, Canada, Europe
+        
+        Aliases:
+          - !Sub
+            - ${Subdomain}.${DomainName}
+            - Subdomain: !FindInMap [EnvironmentMap, !Ref Environment, Subdomain]
+        
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ''  # Using public bucket for simplicity
+        
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # Managed-CachingOptimized
+          ResponseHeadersPolicyId: 5cc3b908-e619-4b99-88e5-2cf7f45965bd  # CORS-With-Preflight
+        
+        CustomErrorResponses:
+          # Handle SPA routing - return index.html for 404s
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 0
+
+  # ==================== Route 53 DNS Record ====================
+  
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub
+        - ${Subdomain}.${DomainName}
+        - Subdomain: !FindInMap [EnvironmentMap, !Ref Environment, Subdomain]
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront Hosted Zone ID
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        EvaluateTargetHealth: false
+
+Outputs:
+  BucketName:
+    Description: S3 bucket name for frontend hosting
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub ${Environment}-frontend-bucket
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub ${Environment}-frontend-distribution-id
+
+  CloudFrontDomainName:
+    Description: CloudFront Distribution Domain Name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub ${Environment}-frontend-cloudfront-domain
+
+  FrontendURL:
+    Description: Frontend application URL
+    Value: !Sub
+      - https://${Subdomain}.${DomainName}
+      - Subdomain: !FindInMap [EnvironmentMap, !Ref Environment, Subdomain]
+    Export:
+      Name: !Sub ${Environment}-frontend-url

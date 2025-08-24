@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: API Gateway CORS Configuration
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, stg, prod]
+    Description: Environment name
+
+Resources:
+  ApiGatewayCorsConfiguration:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${Environment}-ns-api'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - 'https://dz2lwnpg8aefz.cloudfront.net'
+          - 'https://dev.visualforge.ai'
+          - 'https://stg.visualforge.ai'
+          - 'https://visualforge.ai'
+          - 'http://localhost:5176'
+          - 'http://localhost:5173'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - X-Amz-Date
+          - Authorization
+          - X-Api-Key
+          - X-Amz-Security-Token
+          - X-Test-Environment
+        AllowCredentials: true
+        MaxAge: 300
+
+  # Cost Controls API Routes
+  CostControlsCheckRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      RouteKey: 'POST /costcontrols/check'
+      Target: !Sub 'integrations/${CostControlsIntegration}'
+      AuthorizationType: NONE
+
+  CostControlsCommitRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      RouteKey: 'POST /costcontrols/commit'
+      Target: !Sub 'integrations/${CostControlsIntegration}'
+      AuthorizationType: NONE
+
+  CostControlsOptionsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      RouteKey: 'OPTIONS /costcontrols/{proxy+}'
+      Target: !Sub 'integrations/${CorsIntegration}'
+      AuthorizationType: NONE
+
+  # Health Check Routes
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      RouteKey: 'GET /health'
+      Target: !Sub 'integrations/${HealthIntegration}'
+      AuthorizationType: NONE
+
+  # Lambda Integration for Cost Controls
+  CostControlsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigatewayv2:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${Environment}-ns-core/invocations'
+      PayloadFormatVersion: '2.0'
+
+  # Health Check Integration
+  HealthIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: GET
+      IntegrationUri: 'https://example.com/health'
+      PayloadFormatVersion: '1.0'
+      ResponseParameters:
+        200:
+          statusCode: 200
+          responseParameters:
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+
+  # CORS Mock Integration
+  CorsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      IntegrationType: HTTP_PROXY
+      IntegrationMethod: OPTIONS
+      IntegrationUri: 'https://example.com'
+      PayloadFormatVersion: '1.0'
+      ResponseParameters:
+        200:
+          statusCode: 200
+          responseParameters:
+            method.response.header.Access-Control-Allow-Origin: "'*'"
+            method.response.header.Access-Control-Allow-Headers: "'*'"
+            method.response.header.Access-Control-Allow-Methods: "'*'"
+
+  # API Stage
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ApiGatewayCorsConfiguration
+      StageName: !Ref Environment
+      AutoDeploy: true
+
+  # Lambda Permissions
+  ApiGatewayInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub '${Environment}-ns-core'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayCorsConfiguration}/*/*'
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !GetAtt ApiGatewayCorsConfiguration.ApiEndpoint
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  ApiId:
+    Description: API Gateway ID
+    Value: !Ref ApiGatewayCorsConfiguration
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiId'

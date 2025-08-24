@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Route 53 configuration for VisualForge frontend
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name
+  
+  DomainName:
+    Type: String
+    Default: visualforge.ai
+    Description: Base domain name
+  
+  CloudFrontDistributionId:
+    Type: String
+    Description: CloudFront distribution ID
+  
+  CloudFrontDomainName:
+    Type: String
+    Description: CloudFront distribution domain name
+
+Resources:
+  # Get the hosted zone
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub 'Hosted zone for ${DomainName}'
+
+  # Create A record for app subdomain
+  AppDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub
+        - 'app-${Environment}.${DomainName}'
+        - Environment: !Ref Environment
+          DomainName: !Ref DomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront hosted zone ID (constant)
+        DNSName: !Ref CloudFrontDomainName
+        EvaluateTargetHealth: false
+      Comment: !Sub 'Frontend for ${Environment} environment'
+
+  # Create AAAA record for IPv6
+  AppDNSRecordIPv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: !Sub
+        - 'app-${Environment}.${DomainName}'
+        - Environment: !Ref Environment
+          DomainName: !Ref DomainName
+      Type: AAAA
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront hosted zone ID (constant)
+        DNSName: !Ref CloudFrontDomainName
+        EvaluateTargetHealth: false
+      Comment: !Sub 'Frontend IPv6 for ${Environment} environment'
+
+Outputs:
+  AppURL:
+    Description: Application URL
+    Value: !Sub
+      - 'https://app-${Environment}.${DomainName}'
+      - Environment: !Ref Environment
+        DomainName: !Ref DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-AppURL'
+  
+  HostedZoneId:
+    Description: Route 53 Hosted Zone ID
+    Value: !Ref HostedZone
+    Export:
+      Name: !Sub '${AWS::StackName}-HostedZoneId'

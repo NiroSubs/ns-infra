@@ -1,0 +1,38 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "prod"
+  },
+  {
+    "ParameterKey": "DatabaseName",
+    "ParameterValue": "visualforge"
+  },
+  {
+    "ParameterKey": "MasterUsername",
+    "ParameterValue": "postgres"
+  },
+  {
+    "ParameterKey": "MasterPassword",
+    "ParameterValue": "CHANGE_ME_PROD_PASSWORD"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "app.visualforge.ai"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": "arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/CERTIFICATE_ID"
+  },
+  {
+    "ParameterKey": "GoogleClientId",
+    "ParameterValue": "YOUR_GOOGLE_CLIENT_ID"
+  },
+  {
+    "ParameterKey": "GoogleClientSecret",
+    "ParameterValue": "YOUR_GOOGLE_CLIENT_SECRET"
+  },
+  {
+    "ParameterKey": "NotificationEmail",
+    "ParameterValue": "admin@visualforge.ai"
+  }
+]

@@ -1,0 +1,38 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "DatabaseName",
+    "ParameterValue": "visualforge"
+  },
+  {
+    "ParameterKey": "MasterUsername",
+    "ParameterValue": "apiuser"
+  },
+  {
+    "ParameterKey": "MasterPassword",
+    "ParameterValue": "vsForgePass123!"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "visualforge.ai"
+  },
+  {
+    "ParameterKey": "CertificateArn",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "GoogleClientId",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "GoogleClientSecret",
+    "ParameterValue": ""
+  },
+  {
+    "ParameterKey": "NotificationEmail",
+    "ParameterValue": "admin@visualforge.ai"
+  }
+]

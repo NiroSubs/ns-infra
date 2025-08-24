@@ -1,0 +1,14 @@
+[
+  {
+    "ParameterKey": "Environment",
+    "ParameterValue": "dev"
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "visualforge.ai"
+  },
+  {
+    "ParameterKey": "HostedZoneId",
+    "ParameterValue": "Z015790023056BKZ15UTB"
+  }
+]
