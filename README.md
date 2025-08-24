@@ -79,8 +79,8 @@ Deploys Lambda functions for microservices:
 
 | Branch | Environment | Purpose |
 |--------|-------------|---------|
-| `main` | `prod` | Production environment |
-| `staging` | `staging` | Staging environment for pre-production testing |
+| `master` | `prod` | Production environment |
+| `staging` | `stg` | Staging environment for pre-production testing |
 | `develop` | `dev` | Development environment |
 
 ### Required Secrets
