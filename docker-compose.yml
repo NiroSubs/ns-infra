@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: nirosubs
+      POSTGRES_USER: nirosubs
+      POSTGRES_PASSWORD: nirosubs123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - ns-network
+
+  ns-auth:
+    build: ./ns-auth
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgresql://nirosubs:nirosubs123@postgres:5432/nirosubs
+      NODE_ENV: development
+    depends_on:
+      - postgres
+    networks:
+      - ns-network
+
+  ns-dashboard:
+    build: ./ns-dashboard
+    ports:
+      - "3002:3002"
+    environment:
+      DATABASE_URL: postgresql://nirosubs:nirosubs123@postgres:5432/nirosubs
+      NODE_ENV: development
+    depends_on:
+      - postgres
+    networks:
+      - ns-network
+
+  ns-payments:
+    build: ./ns-payments
+    ports:
+      - "3003:3003"
+    environment:
+      DATABASE_URL: postgresql://nirosubs:nirosubs123@postgres:5432/nirosubs
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-sk_test_dummy}
+      NODE_ENV: development
+    depends_on:
+      - postgres
+    networks:
+      - ns-network
+
+  ns-user:
+    build: ./ns-user
+    ports:
+      - "3004:3004"
+    environment:
+      DATABASE_URL: postgresql://nirosubs:nirosubs123@postgres:5432/nirosubs
+      NODE_ENV: development
+    depends_on:
+      - postgres
+    networks:
+      - ns-network
+
+  ns-shell:
+    build: ./ns-shell
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      AUTH_SERVICE_URL: http://ns-auth:3001
+      DASHBOARD_SERVICE_URL: http://ns-dashboard:3002
+      PAYMENTS_SERVICE_URL: http://ns-payments:3003
+      USER_SERVICE_URL: http://ns-user:3004
+    depends_on:
+      - ns-auth
+      - ns-dashboard
+      - ns-payments
+      - ns-user
+    networks:
+      - ns-network
+
+volumes:
+  postgres_data:
+
+networks:
+  ns-network:
+    driver: bridge

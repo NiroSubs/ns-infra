@@ -18,7 +18,7 @@ on:
         type: choice
         options:
           - dev
-          - staging
+          - stg
           - prod
       stack_name:
         description: 'Specific stack to deploy (optional)'
@@ -41,7 +41,7 @@ jobs:
           elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "environment=prod" >> $GITHUB_OUTPUT
           elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
-            echo "environment=staging" >> $GITHUB_OUTPUT
+            echo "environment=stg" >> $GITHUB_OUTPUT
           else
             echo "environment=dev" >> $GITHUB_OUTPUT
           fi

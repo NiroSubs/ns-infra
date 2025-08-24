@@ -12,7 +12,7 @@ on:
         type: choice
         options:
           - dev
-          - staging
+          - stg
           - prod
       service:
         description: 'Service to deploy'
