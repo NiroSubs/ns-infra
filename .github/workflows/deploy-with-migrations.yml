@@ -1,0 +1,151 @@
+name: Deploy with Database Migrations
+
+on:
+  push:
+    branches: 
+      - dev
+      - staging  
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      aws-account-id: ${{ steps.env.outputs.aws-account-id }}
+    steps:
+      - id: env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=prod" >> $GITHUB_OUTPUT
+            echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT  
+            echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+          fi
+
+  run-migrations:
+    needs: determine-environment
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run database migrations
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+          AWS_ACCOUNT_ID: ${{ needs.determine-environment.outputs.aws-account-id }}
+        run: |
+          echo "🚀 Running database migrations for $ENVIRONMENT"
+          
+          # Get database credentials from Secrets Manager
+          SECRET_ARN="arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:$ENVIRONMENT/visualforge/database"
+          
+          echo "📡 Retrieving database credentials..."
+          DB_SECRET=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
+          
+          # Parse credentials
+          DB_HOST=$(echo $DB_SECRET | jq -r '.host')
+          DB_PORT=$(echo $DB_SECRET | jq -r '.port') 
+          DB_NAME=$(echo $DB_SECRET | jq -r '.database')
+          DB_USER=$(echo $DB_SECRET | jq -r '.username')
+          DB_PASS=$(echo $DB_SECRET | jq -r '.password')
+          
+          export DATABASE_URL="postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME"
+          
+          # Run migration script
+          chmod +x ns-infra/scripts/run-migrations.sh
+          ./ns-infra/scripts/run-migrations.sh $ENVIRONMENT
+
+  deploy-infrastructure:
+    needs: [determine-environment, run-migrations]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy CloudFormation stacks
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+        run: |
+          echo "🏗️  Deploying infrastructure to $ENVIRONMENT"
+          
+          # Deploy database stack first
+          aws cloudformation deploy \
+            --template-file ns-infra/cloudformation/templates/database.yaml \
+            --stack-name $ENVIRONMENT-database \
+            --parameter-overrides Environment=$ENVIRONMENT \
+            --capabilities CAPABILITY_IAM
+          
+          # Deploy Lambda functions
+          aws cloudformation deploy \
+            --template-file ns-infra/cloudformation/templates/lambda-functions.yaml \
+            --stack-name $ENVIRONMENT-lambda-functions \
+            --parameter-overrides Environment=$ENVIRONMENT \
+            --capabilities CAPABILITY_IAM
+          
+          # Deploy API Gateway
+          aws cloudformation deploy \
+            --template-file ns-infra/cloudformation/templates/api-gateway.yaml \
+            --stack-name $ENVIRONMENT-api-gateway \
+            --parameter-overrides Environment=$ENVIRONMENT \
+            --capabilities CAPABILITY_IAM
+
+  health-check:
+    needs: [determine-environment, deploy-infrastructure]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Health check endpoints
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+        run: |
+          echo "🏥 Running health checks for $ENVIRONMENT"
+          
+          # Get API Gateway endpoint from CloudFormation outputs
+          API_ENDPOINT=$(aws cloudformation describe-stacks \
+            --stack-name $ENVIRONMENT-api-gateway \
+            --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
+            --output text)
+          
+          # Test health endpoints
+          echo "Testing $API_ENDPOINT/$ENVIRONMENT/ns-user/health"
+          curl -f "$API_ENDPOINT/$ENVIRONMENT/ns-user/health" || exit 1
+          
+          echo "Testing $API_ENDPOINT/$ENVIRONMENT/ns-dashboard/health"  
+          curl -f "$API_ENDPOINT/$ENVIRONMENT/ns-dashboard/health" || exit 1
+          
+          echo "✅ All health checks passed"
