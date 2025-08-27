@@ -4,7 +4,7 @@ on:
   push:
     branches: 
       - dev
-      - staging  
+      - 'release-*'
       - main
   pull_request:
     branches:
@@ -25,9 +25,10 @@ jobs:
           if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "environment=prod" >> $GITHUB_OUTPUT
             echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
-          elif [[ "${{ github.ref }}" == "refs/heads/staging" ]]; then
+          elif [[ "${{ github.ref }}" == refs/heads/release-* ]]; then
             echo "environment=staging" >> $GITHUB_OUTPUT  
             echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+            echo "release-branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
           else
             echo "environment=dev" >> $GITHUB_OUTPUT
             echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
@@ -59,8 +60,13 @@ jobs:
         env:
           ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
           AWS_ACCOUNT_ID: ${{ needs.determine-environment.outputs.aws-account-id }}
+          RELEASE_BRANCH: ${{ needs.determine-environment.outputs.release-branch }}
         run: |
-          echo "🚀 Running database migrations for $ENVIRONMENT"
+          if [[ "$ENVIRONMENT" == "staging" && -n "$RELEASE_BRANCH" ]]; then
+            echo "🚀 Running database migrations for $ENVIRONMENT (release: $RELEASE_BRANCH)"
+          else
+            echo "🚀 Running database migrations for $ENVIRONMENT"
+          fi
           
           # Get database credentials from Secrets Manager
           SECRET_ARN="arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:$ENVIRONMENT/visualforge/database"
