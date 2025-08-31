@@ -1,0 +1,495 @@
+name: Deploy and Test All Services
+
+on:
+  push:
+    branches: [dev, 'release-*', main]
+  pull_request:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  NODE_VERSION: '18'
+
+jobs:
+  determine-environment:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      aws-account-id: ${{ steps.env.outputs.aws-account-id }}
+      deploy: ${{ steps.env.outputs.deploy }}
+      test-url: ${{ steps.env.outputs.test-url }}
+      api-url: ${{ steps.env.outputs.api-url }}
+    steps:
+      - id: env
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+            echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "test-url=https://app.visualforge.ai" >> $GITHUB_OUTPUT
+            echo "api-url=https://api.visualforge.ai" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/heads/release-* ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT  
+            echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "test-url=https://app-stg.visualforge.ai" >> $GITHUB_OUTPUT
+            echo "api-url=https://api-stg.visualforge.ai" >> $GITHUB_OUTPUT
+            echo "release-branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+            echo "deploy=true" >> $GITHUB_OUTPUT
+            echo "test-url=https://app-dev.visualforge.ai" >> $GITHUB_OUTPUT
+            echo "api-url=https://api-dev.visualforge.ai" >> $GITHUB_OUTPUT
+          else
+            echo "environment=dev" >> $GITHUB_OUTPUT
+            echo "aws-account-id=816454053517" >> $GITHUB_OUTPUT
+            echo "deploy=false" >> $GITHUB_OUTPUT
+            echo "test-url=" >> $GITHUB_OUTPUT
+            echo "api-url=" >> $GITHUB_OUTPUT
+          fi
+
+  # Run unit tests first (fast feedback)
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [ns-auth, ns-dashboard, ns-payments, ns-user]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: '${{ matrix.service }}/backend/package-lock.json'
+      
+      - name: Install backend dependencies
+        run: |
+          cd ${{ matrix.service }}/backend
+          npm ci
+      
+      - name: Run backend unit tests
+        run: |
+          cd ${{ matrix.service }}/backend
+          npm run test
+      
+      - name: Install frontend dependencies (dashboard only)
+        if: matrix.service == 'ns-dashboard'
+        run: |
+          cd ${{ matrix.service }}/frontend
+          npm ci
+      
+      - name: Run frontend unit tests (dashboard only)
+        if: matrix.service == 'ns-dashboard'
+        run: |
+          cd ${{ matrix.service }}/frontend
+          npm run test
+
+  # Deploy infrastructure and services
+  deploy-infrastructure:
+    needs: [determine-environment, unit-tests]
+    if: needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Run database migrations
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+          AWS_ACCOUNT_ID: ${{ needs.determine-environment.outputs.aws-account-id }}
+        run: |
+          echo "🚀 Running database migrations for $ENVIRONMENT"
+          
+          # Get database credentials from Secrets Manager
+          SECRET_ARN="arn:aws:secretsmanager:$AWS_REGION:$AWS_ACCOUNT_ID:secret:$ENVIRONMENT/visualforge/database"
+          
+          echo "📡 Retrieving database credentials..."
+          DB_SECRET=$(aws secretsmanager get-secret-value --secret-id "$SECRET_ARN" --query SecretString --output text)
+          
+          # Parse credentials
+          DB_HOST=$(echo $DB_SECRET | jq -r '.host')
+          DB_PORT=$(echo $DB_SECRET | jq -r '.port') 
+          DB_NAME=$(echo $DB_SECRET | jq -r '.database')
+          DB_USER=$(echo $DB_SECRET | jq -r '.username')
+          DB_PASS=$(echo $DB_SECRET | jq -r '.password')
+          
+          export DATABASE_URL="postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME"
+          
+          # Run migration script
+          chmod +x ns-infra/scripts/run-migrations.sh
+          ./ns-infra/scripts/run-migrations.sh $ENVIRONMENT
+
+      - name: Deploy CloudFormation stacks
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+        run: |
+          echo "🏗️  Deploying infrastructure to $ENVIRONMENT"
+          
+          # Deploy database stack first
+          aws cloudformation deploy \
+            --template-file ns-infra/cloudformation/templates/database.yaml \
+            --stack-name $ENVIRONMENT-database \
+            --parameter-overrides Environment=$ENVIRONMENT \
+            --capabilities CAPABILITY_IAM
+          
+          # Deploy Lambda functions
+          aws cloudformation deploy \
+            --template-file ns-infra/cloudformation/templates/lambda-functions.yaml \
+            --stack-name $ENVIRONMENT-lambda-functions \
+            --parameter-overrides Environment=$ENVIRONMENT \
+            --capabilities CAPABILITY_IAM
+          
+          # Deploy API Gateway
+          aws cloudformation deploy \
+            --template-file ns-infra/cloudformation/templates/api-gateway.yaml \
+            --stack-name $ENVIRONMENT-api-gateway \
+            --parameter-overrides Environment=$ENVIRONMENT \
+            --capabilities CAPABILITY_IAM
+
+  # Deploy Lambda functions
+  deploy-lambdas:
+    needs: [determine-environment, deploy-infrastructure]
+    if: needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    strategy:
+      matrix:
+        service: [ns-auth, ns-dashboard, ns-payments, ns-user]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: '${{ matrix.service }}/backend/lambda/package-lock.json'
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Build and deploy Lambda
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          cd $SERVICE/backend/lambda
+          
+          echo "📦 Building Lambda for $SERVICE in $ENVIRONMENT"
+          
+          # Install dependencies
+          npm ci --production
+          
+          # Build the Lambda package
+          npm run build
+          
+          # Create deployment package
+          zip -r ${SERVICE}-${ENVIRONMENT}-lambda.zip dist/ node_modules/ package.json
+          
+          # Deploy to AWS Lambda
+          aws lambda update-function-code \
+            --function-name ${ENVIRONMENT}-${SERVICE#ns-} \
+            --zip-file fileb://${SERVICE}-${ENVIRONMENT}-lambda.zip \
+            --region $AWS_REGION
+
+  # Deploy Frontend
+  deploy-frontend:
+    needs: [determine-environment, deploy-infrastructure]
+    if: needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'ns-dashboard/frontend/package-lock.json'
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Build and deploy frontend
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+        run: |
+          cd ns-dashboard/frontend
+          
+          echo "🎨 Building frontend for $ENVIRONMENT"
+          
+          # Install dependencies
+          npm ci
+          
+          # Build for specific environment
+          if [ "$ENVIRONMENT" == "production" ]; then
+            npm run build:production
+            S3_BUCKET="vf-prd-dashboard"
+          elif [ "$ENVIRONMENT" == "staging" ]; then
+            npm run build:staging
+            S3_BUCKET="vf-stg-dashboard"
+          else
+            npm run build:dev
+            S3_BUCKET="vf-dev-dashboard"
+          fi
+          
+          echo "🚀 Deploying to S3 bucket: $S3_BUCKET"
+          
+          # Deploy to S3
+          aws s3 sync dist/ s3://$S3_BUCKET/ --delete
+          
+          # Get CloudFront distribution ID and invalidate cache
+          DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+            --stack-name $ENVIRONMENT-cloudfront \
+            --query 'Stacks[0].Outputs[?OutputKey==`DistributionId`].OutputValue' \
+            --output text)
+          
+          if [ -n "$DISTRIBUTION_ID" ]; then
+            echo "🔄 Invalidating CloudFront cache: $DISTRIBUTION_ID"
+            aws cloudfront create-invalidation \
+              --distribution-id $DISTRIBUTION_ID \
+              --paths "/*"
+          fi
+
+  # Wait for deployment to be ready
+  deployment-readiness:
+    needs: [determine-environment, deploy-lambdas, deploy-frontend]
+    if: needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Wait for deployment
+        run: |
+          echo "⏳ Waiting for deployment to be ready..."
+          sleep 60
+      
+      - name: Health check
+        env:
+          API_URL: ${{ needs.determine-environment.outputs.api-url }}
+          APP_URL: ${{ needs.determine-environment.outputs.test-url }}
+        run: |
+          echo "🏥 Running health checks..."
+          
+          # Check API health
+          echo "Testing API: $API_URL/health"
+          curl -f "$API_URL/health" || (echo "API health check failed" && exit 1)
+          
+          # Check frontend is accessible
+          echo "Testing Frontend: $APP_URL"
+          curl -f "$APP_URL" || (echo "Frontend health check failed" && exit 1)
+          
+          echo "✅ Health checks passed"
+
+  # Run Integration Tests
+  integration-tests:
+    needs: [determine-environment, deployment-readiness]
+    if: needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'ns-platform-tests/package-lock.json'
+      
+      - name: Install test dependencies
+        run: |
+          cd ns-platform-tests
+          npm ci
+      
+      - name: Run integration tests
+        env:
+          TEST_ENV: ${{ needs.determine-environment.outputs.environment }}
+          API_URL: ${{ needs.determine-environment.outputs.api-url }}
+          APP_URL: ${{ needs.determine-environment.outputs.test-url }}
+        run: |
+          cd ns-platform-tests
+          
+          echo "🧪 Running integration tests against $TEST_ENV environment"
+          echo "API URL: $API_URL"
+          echo "App URL: $APP_URL"
+          
+          # Run API integration tests
+          npm run test:integration -- --grep="integration"
+      
+      - name: Upload integration test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-results-${{ needs.determine-environment.outputs.environment }}
+          path: |
+            ns-platform-tests/test-results/
+            ns-platform-tests/reports/
+
+  # Run Playwright E2E Tests
+  playwright-tests:
+    needs: [determine-environment, deployment-readiness]
+    if: needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'ns-platform-tests/package-lock.json'
+      
+      - name: Install dependencies
+        run: |
+          cd ns-platform-tests
+          npm ci
+      
+      - name: Install Playwright browsers
+        run: |
+          cd ns-platform-tests
+          npx playwright install --with-deps
+      
+      - name: Run Playwright tests
+        env:
+          TEST_ENV: ${{ needs.determine-environment.outputs.environment }}
+          BASE_URL: ${{ needs.determine-environment.outputs.test-url }}
+          API_URL: ${{ needs.determine-environment.outputs.api-url }}
+        run: |
+          cd ns-platform-tests
+          
+          echo "🎭 Running Playwright tests against $TEST_ENV environment"
+          echo "Base URL: $BASE_URL"
+          echo "API URL: $API_URL"
+          
+          # Run Playwright tests with environment-specific config
+          npx playwright test --config=playwright-deployed.config.ts
+      
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ needs.determine-environment.outputs.environment }}
+          path: |
+            ns-platform-tests/playwright-report/
+            ns-platform-tests/test-results/
+          retention-days: 30
+
+  # Run Environment-Specific E2E Tests
+  e2e-tests:
+    needs: [determine-environment, deployment-readiness]
+    if: needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        test-suite: [smoke, critical-path, full]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'ns-platform-tests/package-lock.json'
+      
+      - name: Install dependencies
+        run: |
+          cd ns-platform-tests
+          npm ci
+          npx playwright install --with-deps
+      
+      - name: Run E2E tests
+        env:
+          TEST_ENV: ${{ needs.determine-environment.outputs.environment }}
+          BASE_URL: ${{ needs.determine-environment.outputs.test-url }}
+          API_URL: ${{ needs.determine-environment.outputs.api-url }}
+          TEST_SUITE: ${{ matrix.test-suite }}
+        run: |
+          cd ns-platform-tests
+          
+          echo "🚀 Running $TEST_SUITE E2E tests against $TEST_ENV"
+          
+          # Run different test suites based on environment and type
+          if [ "$TEST_SUITE" == "smoke" ]; then
+            npx playwright test tests/e2e/deployment-smoke.spec.ts
+          elif [ "$TEST_SUITE" == "critical-path" ]; then
+            npx playwright test tests/e2e/auth.spec.ts tests/e2e/navigation.spec.ts
+          else
+            npx playwright test tests/e2e/ --grep-invert="@slow"
+          fi
+      
+      - name: Upload E2E test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results-${{ matrix.test-suite }}-${{ needs.determine-environment.outputs.environment }}
+          path: |
+            ns-platform-tests/test-results/
+            ns-platform-tests/playwright-report/
+
+  # Post-deployment validation
+  post-deployment-validation:
+    needs: [determine-environment, playwright-tests, integration-tests, e2e-tests]
+    if: always() && needs.determine-environment.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Deployment summary
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+          PLAYWRIGHT_RESULT: ${{ needs.playwright-tests.result }}
+          INTEGRATION_RESULT: ${{ needs.integration-tests.result }}
+          E2E_RESULT: ${{ needs.e2e-tests.result }}
+        run: |
+          echo "🎯 Deployment Summary for $ENVIRONMENT"
+          echo "=================================="
+          echo "Playwright Tests: $PLAYWRIGHT_RESULT"
+          echo "Integration Tests: $INTEGRATION_RESULT"
+          echo "E2E Tests: $E2E_RESULT"
+          
+          if [ "$PLAYWRIGHT_RESULT" == "success" ] && [ "$INTEGRATION_RESULT" == "success" ] && [ "$E2E_RESULT" == "success" ]; then
+            echo "✅ All tests passed - deployment successful!"
+          else
+            echo "❌ Some tests failed - check artifacts for details"
+            exit 1
+          fi
+      
+      - name: Update deployment status
+        if: always()
+        env:
+          ENVIRONMENT: ${{ needs.determine-environment.outputs.environment }}
+          APP_URL: ${{ needs.determine-environment.outputs.test-url }}
+          SUCCESS: ${{ needs.playwright-tests.result == 'success' && needs.integration-tests.result == 'success' && needs.e2e-tests.result == 'success' }}
+        run: |
+          if [ "$SUCCESS" == "true" ]; then
+            echo "🚀 Deployment to $ENVIRONMENT completed successfully!"
+            echo "🌐 Application available at: $APP_URL"
+          else
+            echo "⚠️ Deployment to $ENVIRONMENT completed with test failures"
+            echo "Check test artifacts for detailed failure information"
+          fi

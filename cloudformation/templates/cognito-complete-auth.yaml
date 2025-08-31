@@ -1,0 +1,451 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Complete Cognito Authentication - Username/Password + Google OAuth for All Environments'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+    
+  GoogleClientId:
+    Type: String
+    NoEcho: true
+    Description: Google OAuth Client ID from Google Cloud Console
+    
+  GoogleClientSecret:
+    Type: String
+    NoEcho: true
+    Description: Google OAuth Client Secret from Google Cloud Console
+    
+  EnableGoogleOAuth:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable Google OAuth integration
+    
+  EnableUsernamePassword:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Enable username/password authentication
+
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prod]
+  IsStaging: !Equals [!Ref Environment, staging]
+  IsDev: !Equals [!Ref Environment, dev]
+  EnableGoogle: !Equals [!Ref EnableGoogleOAuth, 'true']
+  EnablePassword: !Equals [!Ref EnableUsernamePassword, 'true']
+
+Resources:
+  # Main User Pool with complete configuration
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub '${Environment}-visualforge-users'
+      
+      # Email configuration
+      EmailConfiguration:
+        EmailSendingAccount: COGNITO_DEFAULT
+      AutoVerifiedAttributes:
+        - email
+      
+      # Username configuration - allow email login
+      UsernameAttributes:
+        - email
+      AliasAttributes:
+        - email
+        
+      # Password policy - secure for all environments
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: !If [IsProduction, true, false]
+          TemporaryPasswordValidityDays: 7
+          
+      # Account recovery
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+            
+      # User attributes schema
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: picture
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+          
+      # MFA configuration - optional for production
+      MfaConfiguration: !If [IsProduction, 'OPTIONAL', 'OFF']
+      MfaMethods:
+        !If
+          - IsProduction
+          - - SOFTWARE_TOKEN
+            - SMS
+          - !Ref AWS::NoValue
+        
+      # Device tracking
+      DeviceConfiguration:
+        ChallengeRequiredOnNewDevice: !If [IsProduction, true, false]
+        DeviceOnlyRememberedOnUserPrompt: true
+          
+      # Lambda triggers for enhanced security
+      LambdaTriggers:
+        PreSignUp: !If [IsProduction, !GetAtt PreSignUpLambda.Arn, !Ref AWS::NoValue]
+          
+      # User pool tags
+      UserPoolTags:
+        Environment: !Ref Environment
+        Service: VisualForge
+        Authentication: Complete
+        GoogleOAuth: Enabled
+        PasswordAuth: Enabled
+
+  # Google Identity Provider (conditional)
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Condition: EnableGoogle
+    Properties:
+      UserPoolId: !Ref UserPool
+      ProviderName: Google
+      ProviderType: Google
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: "openid email profile"
+      AttributeMapping:
+        email: email
+        name: name
+        picture: picture
+        username: sub
+        email_verified: email_verified
+
+  # Main User Pool Client - supports both auth methods
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: GoogleIdentityProvider
+    Properties:
+      ClientName: !Sub '${Environment}-visualforge-complete-client'
+      UserPoolId: !Ref UserPool
+      
+      # Configurable authentication flows
+      ExplicitAuthFlows:
+        - !If [EnablePassword, ALLOW_USER_PASSWORD_AUTH, !Ref AWS::NoValue]
+        - ALLOW_USER_SRP_AUTH          # Always allow SRP
+        - !If [EnablePassword, ALLOW_ADMIN_USER_PASSWORD_AUTH, !Ref AWS::NoValue]
+        - ALLOW_CUSTOM_AUTH            # Custom challenges
+        - ALLOW_REFRESH_TOKEN_AUTH     # Token refresh
+        
+      # OAuth flows for Google integration
+      AllowedOAuthFlows:
+        - code
+        - implicit
+      AllowedOAuthFlowsUserPoolClient: true
+      
+      # OAuth scopes
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - profile
+        - aws.cognito.signin.user.admin
+      
+      # Callback and logout URLs for all environments
+      CallbackURLs:
+        - !Sub 
+          - 'https://${AppDomain}/callback'
+          - AppDomain: !If 
+            - IsProduction
+            - 'app.visualforge.ai'
+            - !If 
+              - IsStaging
+              - 'app-stg.visualforge.ai'
+              - 'app-dev.visualforge.ai'
+        - 'http://localhost:5173/callback'  # Local development
+        - 'http://localhost:3000/callback'  # Alternative local port
+      
+      LogoutURLs:
+        - !Sub 
+          - 'https://${AppDomain}/'
+          - AppDomain: !If 
+            - IsProduction
+            - 'app.visualforge.ai'
+            - !If 
+              - IsStaging
+              - 'app-stg.visualforge.ai'
+              - 'app-dev.visualforge.ai'
+        - 'http://localhost:5173/'
+        - 'http://localhost:3000/'
+      
+      # Conditionally support identity providers
+      SupportedIdentityProviders:
+        - !If [EnablePassword, COGNITO, !Ref AWS::NoValue]
+        - !If [EnableGoogle, Google, !Ref AWS::NoValue]
+        
+      # Token validity - environment specific
+      AccessTokenValidity: !If [IsProduction, 1, 2]    # hours
+      IdTokenValidity: !If [IsProduction, 1, 2]        # hours  
+      RefreshTokenValidity: !If [IsProduction, 7, 30]  # days
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+        
+      # Security settings
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      
+      # Attributes the client can read/write
+      ReadAttributes:
+        - email
+        - email_verified
+        - name
+        - picture
+        - sub
+      WriteAttributes:
+        - email
+        - name
+        - picture
+
+  # User Pool Domain for Hosted UI
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub '${Environment}-visualforge-auth-${AWS::AccountId}'
+      UserPoolId: !Ref UserPool
+
+  # User Groups
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admins
+      UserPoolId: !Ref UserPool
+      Description: Administrator users with full access
+      Precedence: 1
+
+  DeveloperGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Developers
+      UserPoolId: !Ref UserPool
+      Description: Developer users for testing
+      Precedence: 2
+
+  UsersGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Users
+      UserPoolId: !Ref UserPool
+      Description: Regular application users
+      Precedence: 3
+
+  # Lambda function for pre-signup validation (production)
+  PreSignUpLambda:
+    Type: AWS::Lambda::Function
+    Condition: IsProduction
+    Properties:
+      FunctionName: !Sub '${Environment}-cognito-presignup'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          def lambda_handler(event, context):
+              # Auto-confirm users for trusted domains
+              trusted_domains = ['visualforge.ai', 'gmail.com']
+              email = event['request']['userAttributes']['email']
+              domain = email.split('@')[1]
+              
+              if domain in trusted_domains:
+                  event['response']['autoConfirmUser'] = True
+                  event['response']['autoVerifyEmail'] = True
+              
+              return event
+      Role: !GetAtt LambdaExecutionRole.Arn
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: IsProduction
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LambdaCognitoPermission:
+    Type: AWS::Lambda::Permission
+    Condition: IsProduction
+    Properties:
+      FunctionName: !Ref PreSignUpLambda
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+  # Test User Creation (non-production environments)
+  TestUserCreation:
+    Type: AWS::CloudFormation::CustomResource
+    Condition: IsDev
+    Properties:
+      ServiceToken: !GetAtt CreateTestUserFunction.Arn
+      UserPoolId: !Ref UserPool
+      UserPoolClientId: !Ref UserPoolClient
+
+  CreateTestUserFunction:
+    Type: AWS::Lambda::Function
+    Condition: IsDev
+    Properties:
+      FunctionName: !Sub '${Environment}-create-test-users'
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Timeout: 60
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          def lambda_handler(event, context):
+              try:
+                  cognito = boto3.client('cognito-idp')
+                  
+                  if event['RequestType'] == 'Create':
+                      user_pool_id = event['ResourceProperties']['UserPoolId']
+                      
+                      # Create test user
+                      cognito.admin_create_user(
+                          UserPoolId=user_pool_id,
+                          Username='test-user-1@visualforge.ai',
+                          UserAttributes=[
+                              {'Name': 'email', 'Value': 'test-user-1@visualforge.ai'},
+                              {'Name': 'email_verified', 'Value': 'true'},
+                              {'Name': 'name', 'Value': 'Test User 1'}
+                          ],
+                          TemporaryPassword='TempPass123!',
+                          MessageAction='SUPPRESS'
+                      )
+                      
+                      # Set permanent password
+                      cognito.admin_set_user_password(
+                          UserPoolId=user_pool_id,
+                          Username='test-user-1@visualforge.ai',
+                          Password='TestPassword123!',
+                          Permanent=True
+                      )
+                      
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                      
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+      Role: !GetAtt TestUserLambdaRole.Arn
+
+  TestUserLambdaRole:
+    Type: AWS::IAM::Role
+    Condition: IsDev
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CognitoAdminAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:AdminDeleteUser
+                Resource: !GetAtt UserPool.Arn
+
+Outputs:
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub '${Environment}-cognito-user-pool-id'
+      
+  UserPoolArn:
+    Description: Cognito User Pool ARN
+    Value: !GetAtt UserPool.Arn
+    Export:
+      Name: !Sub '${Environment}-cognito-user-pool-arn'
+      
+  ClientId:
+    Description: Cognito Client ID (supports both Google OAuth and Username/Password)
+    Value: !Ref UserPoolClient
+    Export:
+      Name: !Sub '${Environment}-cognito-client-id'
+      
+  UserPoolDomain:
+    Description: Cognito Hosted UI Domain
+    Value: !Sub 'https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com'
+    Export:
+      Name: !Sub '${Environment}-cognito-domain'
+      
+  GoogleClientId:
+    Description: Google OAuth Client ID for frontend configuration
+    Value: !Ref GoogleClientId
+    Export:
+      Name: !Sub '${Environment}-google-client-id'
+      
+  AuthenticationMethods:
+    Description: Supported authentication methods
+    Value: !Sub 
+      - '${PasswordAuth}${Separator}${GoogleAuth}'
+      - PasswordAuth: !If [EnablePassword, 'Username/Password', '']
+        Separator: !If 
+          - EnablePassword
+          - !If [EnableGoogle, ' + ', '']
+          - ''
+        GoogleAuth: !If [EnableGoogle, 'Google OAuth', '']
+        
+  EnabledAuthMethods:
+    Description: Configuration for frontend
+    Value: !Sub 
+      - 'USERNAME_PASSWORD=${EnablePassword},GOOGLE_OAUTH=${EnableGoogle}'
+      - EnablePassword: !Ref EnableUsernamePassword
+        EnableGoogle: !Ref EnableGoogleOAuth
+    
+  TestUserCredentials:
+    Condition: IsDev
+    Description: Test user credentials for development
+    Value: "Username: test-user-1@visualforge.ai, Password: TestPassword123!"
+    
+  HostedUIURL:
+    Description: Cognito Hosted UI URL
+    Value: !Sub 
+      - 'https://${Domain}.auth.${AWS::Region}.amazoncognito.com/login?client_id=${ClientId}&response_type=code&scope=email+openid+profile&redirect_uri=https://${AppDomain}/callback'
+      - Domain: !Ref UserPoolDomain
+        ClientId: !Ref UserPoolClient
+        AppDomain: !If 
+          - IsProduction
+          - 'app.visualforge.ai'
+          - !If 
+            - IsStaging  
+            - 'app-stg.visualforge.ai'
+            - 'app-dev.visualforge.ai'
